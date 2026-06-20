@@ -1,0 +1,166 @@
+syntax = "proto3";
+
+package asyncify.otel;
+
+option swift_prefix = "WaOtel";
+
+// Fired after a chat turn finishes (final Completed status on a Chat
+// consumer). `chat_id` is the provider-specific conversation id
+// (e.g. CAI's `chat_id`). `model_id` is the model/character id used
+// for that turn.
+message MessageSent {
+  string chat_id = 1;
+  string model_id = 2;
+  // Ciphered plugin app_id (same encoding as `task.Action.provider`).
+  string provider_id = 3;
+}
+
+// Fired after a model/character is created via the `create_model`
+// action. Mirrors the record persisted to `<cache_dir>/cai/characters.json`
+// so the backend sees the same data the host will replay from cache.
+message ModelCreated {
+  string model_id = 1;
+  string model_name = 2;
+  string visibility = 3;
+  string description = 4;
+  repeated string tags = 5;
+  // Ciphered plugin app_id (same encoding as `task.Action.provider`).
+  string provider_id = 6;
+  // Avatar / preview image URL for the model (empty if none).
+  string image = 7;
+  // TTS voice presets for this model (e.g. "Anime Girl", "British Male").
+  // Empty for providers that don't support voice selection.
+  repeated string voices = 8;
+  // Opening lines / greetings for the model (e.g. character intro messages).
+  repeated string greetings = 9;
+  // User-selected gender hint (e.g. "Male", "Female", "Non-binary"). Empty
+  // when the creator didn't specify; the LLM still drafts a coherent
+  // character without it. Free-form string — no enum validation.
+  string gender = 10;
+  // User-selected speech tone (e.g. "sarcastic", "warm", "formal"). Used
+  // by `generate_model::generate` to shape the `definition` example
+  // dialogues. Empty when unspecified. Free-form string.
+  string tone = 11;
+  // User-supplied personality traits (e.g. "blunt", "overthinks",
+  // "kind-hearted"). LLM threads these into the `definition` so every
+  // example exchange demonstrates at least one trait, and prepends them
+  // to `description` as a period-separated trait list. Free-form strings.
+  repeated string traits = 12;
+}
+
+// Fired by both device actions (Set Firebase Token, Enable Notification).
+// Combines push-token registration and notification opt-in into one event
+// so the backend always sees the full device notification state atomically.
+// When disabling, `firebase_token` may be empty.
+message NotificationSettings {
+  // FCM registration token for this device (empty when disabling).
+  string firebase_token = 1;
+  // true = user granted notification permission, false = revoked.
+  bool enabled = 2;
+  // Host app bundle identifier (e.g. "com.example.app").
+  string bundle_id = 3;
+  // Firebase Auth UID for this user (absent if not signed in).
+  optional string firebase_uid = 4;
+  // Apple Live Activity update token for updating/ending running activities (empty when no activity running).
+  string live_activity_token = 5;
+  // Apple WidgetKit push token for background widget refreshes (empty when unavailable).
+  string widget_token = 6;
+  // Swift `ActivityAttributes` struct name for push-to-start Live Activities
+  // (e.g. "WasmLiveActivityAttributes"). The backend stamps this into the
+  // APNs `attributes-type` field for PTS pushes so the server is not
+  // build-time coupled to the client's Swift type name. Sent on every
+  // emit; backend upsert keeps the last non-empty value (empty = older
+  // client, use fallback).
+  string live_activity_attributes_type = 7;
+}
+
+// Fired when a mobile client completes (or abandons) an onboarding survey.
+// The full Q&A JSON blob is included so the backend can store it without
+// a separate fetch. bundle_id + device_id identify the submission uniquely.
+message SurveySubmitted {
+  // Host app bundle identifier (e.g. "com.example.app").
+  string bundle_id = 1;
+  // Host-side device identifier (same as device_id in TaskOpts).
+  string device_id = 2;
+  // Full Q&A as a JSON object — each entry contains the question text and
+  // the user's answer. Example: {"q1":{"question":"What brings you here?","answer":"scanning"},"q2":{...}}
+  string qa_json = 3;
+  // Wall-clock time the user completed (or abandoned) the survey, RFC 3339.
+  string completed_at = 4;
+}
+
+// Fired when the user enables or disables notifications for a domain
+// entity such as a team, league or competition. `enabled = true` means
+// subscribe, `false` means unsubscribe — backends should treat both as
+// authoritative writes against (bundle_id, device_id, entity, id).
+message NotificationSubscribe {
+  // Host app bundle identifier (e.g. "com.example.app").
+  string bundle_id = 1;
+  // Host-side device identifier (same as device_id in TaskOpts).
+  string device_id = 2;
+  // Entity kind being (un)subscribed — free-form string, e.g. "team",
+  // "league", "competition". The backend treats it as a namespace.
+  string entity = 3;
+  // Entity identifier within that namespace, e.g. a Scorebat team id
+  // or a competition slug. Format is provider-specific.
+  string id = 4;
+  // true = user enabled notifications for this entity (subscribe),
+  // false = user disabled them (unsubscribe).
+  bool enabled = 5;
+}
+
+// Fired when the user requests account/data deletion from the mobile
+// client. The backend treats this as an authoritative GDPR-style purge
+// keyed by (bundle_id, device_id) — and, when the device was signed in,
+// also by `firebase_uid` so per-user records are removed too.
+message UserDeleted {
+  // Host app bundle identifier (e.g. "com.example.app").
+  string bundle_id = 1;
+  // Host-side device identifier (same as device_id in TaskOpts).
+  string device_id = 2;
+  // Firebase Auth UID for this user (absent if not signed in). When
+  // present the backend purges per-user records in addition to the
+  // per-device ones.
+  optional string firebase_uid = 3;
+}
+
+// Fired when a per-entity Apple Live Activity's APNs push token is
+// issued, rotated, or retired. Decoupled from the user's follow tap:
+// ActivityKit owns token lifecycle, the client just observes and
+// forwards. The token store is AGNOSTIC — it mirrors
+// `NotificationSubscribe`'s (entity, entity_id) shape so the same
+// plumbing serves match Live Activities today and other LA types
+// later. Backend keys rows by (bundle_id, device_id, entity,
+// entity_id); LA fanout joins this against notification_subscriptions
+// for the same (entity, entity_id) to confirm the follow is active.
+message LiveActivityToken {
+  // Host app bundle identifier (e.g. "com.example.app").
+  string bundle_id = 1;
+  // Host-side device identifier (same as device_id in TaskOpts).
+  string device_id = 2;
+  // Entity kind this Live Activity tracks — free-form namespace,
+  // currently always "match" (mirrors NotificationSubscribe.entity).
+  string entity = 3;
+  // Entity identifier within that namespace, e.g. a Scorebat match
+  // id. Provider-specific format (mirrors NotificationSubscribe.id).
+  string entity_id = 4;
+  // APNs push token for this Live Activity as lowercase hex (no
+  // spaces/dashes). Empty string = the activity ended/dismissed and
+  // the backend should retire (delete) the row.
+  string la_token = 5;
+}
+
+// Envelope used on the wire so the backend can route by event kind
+// without guessing from `payload.name`.
+message Event {
+  oneof kind {
+    MessageSent message_sent = 1;
+    ModelCreated model_created = 2;
+    NotificationSettings notification_settings = 3;
+    SurveySubmitted survey_submitted = 4;
+    NotificationSubscribe notification_subscribe = 5;
+    UserDeleted user_deleted = 6;
+    LiveActivityToken live_activity_token = 7;
+  }
+}
+

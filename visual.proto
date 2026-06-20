@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package asyncify.visual;
+
+import "codegen.proto";
+
+option swift_prefix = "Visual";
+
+message PhotoSearchResult {
+  int32 total = 1;
+  int32 total_pages = 2 [json_name="total_pages"];
+  repeated Photo results = 3;
+}
+
+message Photo {
+  string id = 1;
+  optional string description = 2;
+  optional string alt_description = 3 [json_name="alt_description"];
+  int32 width = 4;
+  int32 height = 5;
+  optional string color = 6;
+  optional string blur_hash = 7 [json_name="blur_hash"];
+  PhotoUrls urls = 8;
+  PhotoUser user = 9;
+  PhotoLinks links = 10;
+  int32 likes = 11;
+}
+
+message PhotoUrls {
+  string raw = 1;
+  string full = 2;
+  string regular = 3;
+  string small = 4;
+  string thumb = 5;
+}
+
+message PhotoUser {
+  string username = 1;
+  string name = 2;
+  optional string profile_image = 3 [json_name="profile_image"];
+}
+
+message PhotoLinks {
+  optional string html = 1;
+  optional string download = 2;
+}
+
+// =====================================================================
+// Typed request envelopes — flat string fields land as `args["X"]`.
+// No BaseRequest: Rust's provider_strategy picks the provider.
+// =====================================================================
+
+message SearchPhotosRequest {
+  // Free-text search query.
+  string query = 1;
+  // 1-based page index; 0 / unset = 1.
+  int32 page = 2;
+  // Page size; 0 / unset = 20.
+  int32 per_page = 3 [json_name="per_page"];
+}
+
+message PhotoVisualSearchRequest {
+  // Image URL (file://, data:, or http(s)://) to visually match.
+  string file = 1;
+  int32 page = 2;
+  int32 per_page = 3 [json_name="per_page"];
+}
+
+service VisualService {
+  rpc SearchPhotos(SearchPhotosRequest) returns (PhotoSearchResult);
+  rpc PhotoVisualSearch(PhotoVisualSearchRequest) returns (PhotoSearchResult);
+}
+

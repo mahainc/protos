@@ -1,0 +1,586 @@
+syntax = "proto3";
+
+package asyncify.openai;
+
+import "google/protobuf/struct.proto";
+import "codegen.proto";
+import "types.proto";
+
+option swift_prefix = "OpenAI";
+
+// BaseRequest moved to types.proto for cross-service reuse — see
+// `asyncify.types.BaseRequest`. Each rpc request below uses it for
+// host-side provider pinning.
+
+enum ChatModel {
+  CHAT_MODEL_UNSPECIFIED = 0;
+  CHAT_MODEL_GPT_4O_MINI = 1;
+  CHAT_MODEL_GPT_5_MINI = 2;
+  CHAT_MODEL_GEMINI_2_5_FLASH = 3;
+  CHAT_MODEL_GEMINI_2_5_PRO = 4;
+  CHAT_MODEL_GEMINI_3_FLASH_PREVIEW = 5;
+  CHAT_MODEL_GEMINI_3_PRO_PREVIEW = 6;
+  CHAT_MODEL_CLAUDE_SONNET_4_5 = 7;
+  CHAT_MODEL_CLAUDE_OPUS_4_6 = 8;
+  CHAT_MODEL_DEEPSEEK = 9;
+  CHAT_MODEL_LLAMA_4_MAVERICK = 10;
+  CHAT_MODEL_GROK_4_1_FAST = 11;
+  CHAT_MODEL_GPT_4O_SEARCH_PREVIEW = 12;
+}
+
+message ContentPart {
+  // "text", "image_url", "input_audio", "file"
+  string type = 1;
+  // for type="text"
+  optional string text = 2;
+  // for type="image_url"
+  ImageURL image_url = 3 [json_name="image_url"];
+  // for type="input_audio"
+  InputAudio input_audio = 4 [json_name="input_audio"];
+  // for type="file"
+  FileRef file = 5;
+}
+
+message ImageURL {
+  // URL or data: URI
+  string url = 1;
+  // "low", "high", "auto"
+  optional string detail = 2;
+}
+
+message InputAudio {
+  // base64 encoded audio
+  string data = 1;
+  // "wav", "mp3"
+  string format = 2;
+}
+
+message FileRef {
+  // uploaded file ID
+  optional string file_id = 1 [json_name="file_id"];
+  // for inline base64
+  optional string filename = 2;
+  // base64 data URI
+  optional string file_data = 3 [json_name="file_data"];
+}
+
+message ChatMessage {
+  // "system", "developer", "user", "assistant", "tool"
+  string role = 1;
+  // Per OpenAI's Chat Completions spec the `content` key is
+  // polymorphic — either a plain string (text turn) or an array of
+  // content parts (multimodal). Modeled as google.protobuf.Value so
+  // proto3 JSON serialization produces the OpenAI wire shape verbatim:
+  //   - stringValue("hello") → "content": "hello"
+  //   - listValue([…parts…])  → "content": [ {type, …}, … ]
+  // The Swift helpers `OpenAIChatMessage.setContent(text:)` /
+  // `setContent(parts:)` hide the Value construction at call sites.
+  google.protobuf.Value content = 2;
+  // participant name
+  optional string name = 7;
+  repeated ToolCall tool_calls = 3 [json_name="tool_calls"];
+  optional string tool_call_id = 4 [json_name="tool_call_id"];
+  // model refusal message
+  optional string refusal = 5;
+  // url citations from web search
+  repeated Annotation annotations = 8;
+  // Field 6 / "content_parts" was the pre-spec split between
+  // text and multimodal content; both are now folded into `content`.
+  reserved 6;
+  reserved "content_parts";
+}
+
+message Annotation {
+  // "url_citation"
+  string type = 1;
+  URLCitation url_citation = 2 [json_name="url_citation"];
+}
+
+message URLCitation {
+  int32 start_index = 1 [json_name="start_index"];
+  int32 end_index = 2 [json_name="end_index"];
+  string url = 3;
+  string title = 4;
+}
+
+message ToolCall {
+  string id = 1;
+  // "function"
+  string type = 2;
+  ToolCallFunction function = 3;
+}
+
+message ToolCallFunction {
+  string name = 1;
+  // JSON string
+  string arguments = 2;
+}
+
+message Tool {
+  // "function"
+  string type = 1;
+  ToolFunction function = 2;
+}
+
+message ToolFunction {
+  string name = 1;
+  optional string description = 2;
+  google.protobuf.Struct parameters = 3;
+  optional bool strict = 4;
+}
+
+message ModelInfo {
+  ChatModel id = 1;
+  // display name e.g. "GPT-4o mini"
+  string name = 2;
+  // API string e.g. "gpt-4o-mini"
+  string string_id = 3 [json_name="string_id"];
+  // Freeform per-model extras. Well-known keys: `is_pro` (bool),
+  // `vision` (bool, image input supported).
+  google.protobuf.Struct metadata = 4;
+  reserved "is_pro", "image_support";
+  reserved 5, 6;
+}
+
+message ChatRequest {
+  string model = 1;
+  bool stream = 2;
+  repeated ChatMessage messages = 3;
+  repeated Tool tools = 4;
+  // Polymorphic per OpenAI spec: string enum ("auto" / "required" /
+  // "none") OR object `{type:"function", function:{name:"…"}}`. Value
+  // serializes as the underlying JSON shape (stringValue → JSON
+  // string, structValue → JSON object) so the wire matches OpenAI
+  // verbatim without host-side rewriting.
+  google.protobuf.Value tool_choice = 5 [json_name="tool_choice"];
+  // generation parameters
+  optional double temperature = 6;
+  optional double top_p = 7 [json_name="top_p"];
+  optional int32 max_tokens = 8 [json_name="max_tokens"];
+  optional int32 max_completion_tokens = 9 [json_name="max_completion_tokens"];
+  optional int32 n = 10;
+  optional double frequency_penalty = 11 [json_name="frequency_penalty"];
+  optional double presence_penalty = 12 [json_name="presence_penalty"];
+  optional int32 seed = 13;
+  optional string user = 14;
+  // output format
+  ResponseFormat response_format = 15 [json_name="response_format"];
+  repeated string stop = 16;
+  // modalities
+  repeated string modalities = 17;
+  AudioConfig audio = 18;
+  // streaming
+  StreamOptions stream_options = 19 [json_name="stream_options"];
+  // web search (Chat Completions API)
+  WebSearchOptions web_search_options = 20 [json_name="web_search_options"];
+  // reasoning models
+  optional string reasoning_effort = 21 [json_name="reasoning_effort"];
+  // storage
+  optional bool store = 22;
+  optional string service_tier = 23 [json_name="service_tier"];
+  google.protobuf.Struct metadata = 24;
+}
+
+message ResponseFormat {
+  // "text", "json_object", "json_schema"
+  string type = 1;
+  JSONSchema json_schema = 2 [json_name="json_schema"];
+}
+
+message JSONSchema {
+  string name = 1;
+  optional string description = 2;
+  google.protobuf.Struct schema = 3;
+  optional bool strict = 4;
+}
+
+message AudioConfig {
+  // e.g. "alloy", "echo", "shimmer"
+  string voice = 1;
+  // "wav", "mp3", "flac", "opus", "pcm16"
+  string format = 2;
+}
+
+message StreamOptions {
+  optional bool include_usage = 1 [json_name="include_usage"];
+}
+
+message WebSearchOptions {
+  UserLocation user_location = 1 [json_name="user_location"];
+}
+
+message UserLocation {
+  // "approximate"
+  string type = 1;
+  ApproximateLocation approximate = 2;
+}
+
+message ApproximateLocation {
+  optional string country = 1;
+  optional string city = 2;
+  optional string region = 3;
+  optional string timezone = 4;
+}
+
+message ChatChunkDelta {
+  optional string role = 1;
+  optional string content = 2;
+  repeated ToolCallDelta tool_calls = 3 [json_name="tool_calls"];
+  optional string refusal = 4;
+}
+
+message ToolCallDelta {
+  int32 index = 1;
+  string id = 2;
+  string type = 3;
+  ToolCallFunction function = 4;
+}
+
+message ChatChunkChoice {
+  int32 index = 1;
+  ChatChunkDelta delta = 2;
+  optional string finish_reason = 3 [json_name="finish_reason"];
+  ChatChunkLogprobs logprobs = 4;
+}
+
+message ChatChunkLogprobs {
+  repeated TokenLogprob content = 1;
+  repeated TokenLogprob refusal = 2;
+}
+
+message TokenLogprob {
+  string token = 1;
+  double logprob = 2;
+  repeated int32 bytes = 3;
+  repeated TopLogprob top_logprobs = 4 [json_name="top_logprobs"];
+}
+
+message TopLogprob {
+  string token = 1;
+  double logprob = 2;
+  repeated int32 bytes = 3;
+}
+
+message ChatChunk {
+  string id = 1;
+  // "chat.completion.chunk"
+  string object = 2;
+  int64 created = 3;
+  string model = 4;
+  repeated ChatChunkChoice choices = 5;
+  optional string system_fingerprint = 6 [json_name="system_fingerprint"];
+  optional string service_tier = 7 [json_name="service_tier"];
+  // present when stream_options.include_usage = true
+  ChatUsage usage = 8;
+}
+
+message ChatChoice {
+  int32 index = 1;
+  ChatMessage message = 2;
+  // "stop", "length", "tool_calls", "content_filter"
+  string finish_reason = 3 [json_name="finish_reason"];
+  ChatChoiceLogprobs logprobs = 4;
+}
+
+message ChatChoiceLogprobs {
+  repeated TokenLogprob content = 1;
+  repeated TokenLogprob refusal = 2;
+}
+
+message ChatUsage {
+  int32 prompt_tokens = 1 [json_name="prompt_tokens"];
+  int32 completion_tokens = 2 [json_name="completion_tokens"];
+  int32 total_tokens = 3 [json_name="total_tokens"];
+  PromptTokensDetails prompt_tokens_details = 4 [json_name="prompt_tokens_details"];
+  CompletionTokensDetails completion_tokens_details = 5 [json_name="completion_tokens_details"];
+}
+
+message PromptTokensDetails {
+  optional int32 cached_tokens = 1 [json_name="cached_tokens"];
+  optional int32 audio_tokens = 2 [json_name="audio_tokens"];
+}
+
+message CompletionTokensDetails {
+  optional int32 reasoning_tokens = 1 [json_name="reasoning_tokens"];
+  optional int32 audio_tokens = 2 [json_name="audio_tokens"];
+  optional int32 accepted_prediction_tokens = 3 [json_name="accepted_prediction_tokens"];
+  optional int32 rejected_prediction_tokens = 4 [json_name="rejected_prediction_tokens"];
+}
+
+message ChatCompletion {
+  string id = 1;
+  // "chat.completion"
+  string object = 2;
+  int64 created = 3;
+  string model = 4;
+  repeated ChatChoice choices = 5;
+  ChatUsage usage = 6;
+  optional string system_fingerprint = 7 [json_name="system_fingerprint"];
+  optional string service_tier = 8 [json_name="service_tier"];
+}
+
+// =====================================================================
+// Wasm-action Request/Response wrappers — these are the messages
+// carried on the wasm wire (NOT the OpenAI HTTP wire). ChatRequest /
+// ChatChunk / ChatCompletion / ModelInfo above are reused: ChatRequest
+// doubles as the request for Chat (stream) and Completion (non-stream)
+// rpcs; ChatChunk is the stream element; ChatCompletion is the
+// non-stream response.
+//
+// Init -----------------------------------------------------------------
+// Per-provider warm-up. Returns the provider's action_id + provider id
+// so the host can pre-flight without listActions. `metadata` carries
+// caller-side user metadata (at minimum `name`) that providers like CAI
+// persist in their cache and use to rewrite server-assigned usernames
+// in character replies with `**name**`.
+message InitRequest {
+  // free-form per-call metadata (e.g. `{ "name": "Alice" }`)
+  google.protobuf.Struct metadata = 1;
+  // Shared host-side dispatch fields — currently just provider_id.
+  // See BaseRequest for the full set.
+  asyncify.types.BaseRequest base = 2;
+}
+message InitResponse {
+  string action_id = 1 [json_name="action_id"];
+  string provider_id = 2 [json_name="provider_id"];
+}
+
+// Suggest --------------------------------------------------------------
+message SuggestRequest {
+  // image (data URI or http(s)) to base suggestions on; empty for
+  // text-only suggestions
+  optional string image_url = 1 [json_name="image_url"];
+  // override the default system prompt
+  optional string system_prompt = 2 [json_name="system_prompt"];
+  asyncify.types.BaseRequest base = 3;
+}
+message SuggestResponse {
+  repeated string suggestions = 1;
+}
+
+// ListModels -----------------------------------------------------------
+message ListModelsRequest {
+  // search keyword filter (matches name/description server-side)
+  optional string keyword = 1;
+  // filter by category id
+  optional string category = 2;
+  // pagination — 0-based offset
+  optional int32 offset = 3;
+  // pagination — page size
+  optional int32 limit = 4;
+}
+message ListModelsResponse {
+  repeated ModelInfo models = 1;
+}
+
+// CreateModel ----------------------------------------------------------
+// Custom-persona / character creation (CAI-shaped). Field surface
+// mirrors the current create_model.rs flat args 1-to-1.
+message CreateModelRequest {
+  // unique short id, e.g. "my-helper"
+  string name = 1;
+  // display title shown in pickers
+  string title = 2;
+  string description = 3;
+  // opening assistant message
+  string greeting = 4;
+  // "public", "unlisted", "private"
+  optional string visibility = 5;
+  // avatar image — data URI or URL
+  optional string image = 6;
+  // categories (CAI taxonomy id list). Repeated to match the wire
+  // convention — Rust executor reads either a list or a CSV string
+  // under this key.
+  repeated string category = 7;
+  // persona gender
+  optional string gender = 8;
+  // persona tone
+  optional string tone = 9;
+  // personality traits
+  repeated string traits = 10;
+  asyncify.types.BaseRequest base = 11;
+}
+message CreateModelResponse {
+  // server-assigned model/character id
+  string model_id = 1 [json_name="model_id"];
+  // optional opening greeting echoed back
+  optional string greeting = 2;
+  // optional provider-specific extras
+  google.protobuf.Struct extras = 3;
+}
+
+// GenerateModel --------------------------------------------------------
+// AI-assisted persona generator — runs a chat completion under the
+// hood and returns structured persona fields.
+message GenerateModelRequest {
+  // underlying chat completion request (system + user messages
+  // describing what to generate)
+  ChatRequest chat = 1;
+  // optional candidate greetings to mix in
+  repeated string greetings = 2;
+  // candidate categories
+  repeated string categories = 3;
+  // persona gender hint
+  optional string gender = 4;
+  // persona tone hint
+  optional string tone = 5;
+  // traits to use as seed
+  repeated string traits = 6;
+}
+message GenerateModelResponse {
+  string name = 1;
+  string title = 2;
+  string description = 3;
+  string greeting = 4;
+  optional string category = 5;
+  optional string gender = 6;
+  optional string tone = 7;
+  repeated string traits = 8;
+}
+
+// Tts ------------------------------------------------------------------
+message TtsRequest {
+  // text to synthesize
+  string input = 1;
+  // voice id, e.g. "alloy", "echo", "shimmer"
+  string voice = 2;
+  // backend model id, e.g. "tts-1", "tts-1-hd"
+  optional string model = 3;
+  // output format: "mp3", "wav", "flac", "opus", "pcm16"
+  optional string format = 4;
+  asyncify.types.BaseRequest base = 5;
+}
+message TtsResponse {
+  // Direct URL to the synthesized audio when the provider returns one
+  // (e.g. CAI's `/memo/replay` deep link). Host should prefer this
+  // over `audio_b64` when both are present.
+  optional string audio_url = 1 [json_name="audio_url"];
+  // Base64-encoded audio payload when the provider returns inline
+  // bytes (e.g. OpenAI `/v1/audio/speech` MP3). Decoded by the host
+  // and written to a temp file for playback.
+  optional string audio_b64 = 2 [json_name="audio_b64"];
+  // MIME type ("audio/mpeg", "audio/wav", …) so the host writes the
+  // temp file with the right extension. Empty falls back to "mp3".
+  optional string audio_mime = 3 [json_name="audio_mime"];
+}
+
+// ChatCall -------------------------------------------------------------
+// Wire envelope shared by Chat (streaming) and Completion (non-
+// streaming). Wraps the OpenAI HTTP-shape request body string alongside
+// per-call transport overrides (custom endpoint URL, ad-hoc API key,
+// typed-chunks opt-in). `argsFromRequest` flattens this into the args
+// bag the Rust executors read via `cmd.string_for_field`, so there are
+// no hand-typed arg keys at the Swift call sites — the proto fields
+// ARE the wire contract.
+message ChatCallRequest {
+  // OpenAI HTTP-shape JSON request body (serialized from the typed
+  // ChatRequest proto via jsonUTF8Data on the Swift side — proto3 JSON
+  // matches OpenAI's wire format verbatim now that `content` and
+  // `tool_choice` are google.protobuf.Value).
+  string body = 1;
+  // Optional endpoint override (e.g. an OpenAI-compatible third-party
+  // host). When unset the plugin's default endpoint is used.
+  optional string url = 2;
+  // Optional bearer token override; replaces the plugin's auth_headers
+  // Authorization for this call only.
+  optional string api_key = 3 [json_name="api_key"];
+  // Streaming Chat only: when true the executor emits typed ChatChunk
+  // protos in a routing envelope (`{event:"chat-chunk", data:<b64>}`)
+  // instead of raw OpenAI JSON chunks. Ignored by Completion.
+  optional bool typed_chunks = 4 [json_name="typed_chunks"];
+}
+
+// Auth -----------------------------------------------------------------
+// Provider-specific auth/login flow (e.g. OneAI guest mint, CAI token
+// refresh). Inputs/outputs are mostly opaque blobs — the request
+// carries the on-disk cache directory the executor can persist into,
+// and the response carries whatever the provider wants the host to
+// see (typically nothing — auth is internal).
+message AuthRequest {
+  // cache_dir lives on `BaseRequest.cache_dir` (the cross-service
+  // shared dispatch knob) — every typed wrapper that takes a
+  // BaseRequest gets it automatically lifted as `cacheDir:`.
+  // provider-specific input — e.g. refresh token, email
+  google.protobuf.Struct metadata = 2;
+  asyncify.types.BaseRequest base = 3;
+}
+message AuthResponse {
+  // provider-specific success payload (token id, expiry, …) — empty
+  // when auth is internal-only
+  google.protobuf.Struct credentials = 1;
+}
+
+// =====================================================================
+// Service — OpenAI-compatible chat actions reachable via gRPC-style
+// method names.
+//
+// Each rpc binds a request/response pair to a method name. The wasm
+// dispatcher routes by method name when the wire `action_id` contains
+// '/' (e.g. "asyncify.openai.OpenAIService/Chat"), picking the
+// concrete provider via the persisted provider_strategy. The legacy
+// UUID action_id path stays valid for every rpc — both routes land in
+// the same executor on the Rust side.
+//
+// Hosts that adopt this service skip the per-action listActions
+// discovery: the rpc IS the contract, parameterized by its request
+// type.
+//
+// Multi-provider: the openai surface ships several providers (default
+// openai, vtn, oneai, cai, lensai, …). For each rpc the dispatcher
+// holds a Vec<MethodCandidate>; provider_strategy selects which
+// provider services a given call.
+// =====================================================================
+service OpenAIService {
+  // Provider warm-up — no-op for most, used by plugins that need to
+  // pre-flight credentials before the first real call.
+  rpc Init(InitRequest) returns (InitResponse) {
+    // `init` is a Swift keyword — rename the enum case + dispatch site
+    // to dodge backtick uglies.
+    option (asyncify.codegen.swift_case) = "providerInit";
+  }
+
+  // Streaming chat completion. Each stream element is a ChatChunk;
+  // the terminal "[DONE]" SSE marker flips Task.status to Completed
+  // with no further payload.
+  //
+  // Skip-flow-kit: streaming owns its own host driver
+  // (`OpenAIChatSession`), so a fire-and-forget typed wrapper would
+  // never see the chunks. The `<Prefix>Method.chat` case is still
+  // emitted for dispatch.
+  rpc Chat(ChatRequest) returns (stream ChatChunk) {
+    option (asyncify.codegen.skip_flow_kit) = true;
+  }
+
+  // Non-streaming chat completion — returns one ChatCompletion at
+  // the end. Used by scan/vision plugins that nest a sync chat via
+  // delegate::subtask.
+  rpc Completion(ChatRequest) returns (ChatCompletion);
+
+  // Prompt-suggestion helper — returns a short array of follow-up
+  // strings given an optional image and system prompt. Wire return is
+  // the shared `asyncify.types.ListStrings` envelope — kept for cross-
+  // service reuse instead of a local `SuggestResponse`.
+  rpc Suggest(SuggestRequest) returns (asyncify.types.ListStrings);
+
+  // Model picker source — bundle-scoped backend list, registered
+  // once (not per-plugin). Wire return is the shared
+  // `asyncify.types.ListModels{data,total,offset,limit}` envelope.
+  rpc ListModels(ListModelsRequest) returns (asyncify.types.ListModels);
+
+  // Create a custom persona/character (CAI-shaped). Only registered
+  // for plugins whose Plugin::supports_create_model() is true.
+  rpc CreateModel(CreateModelRequest) returns (CreateModelResponse);
+
+  // GenerateModel is intentionally not surfaced — it's an internal
+  // subtask driven inline by CreateModel implementations when fields
+  // need drafting. The GenerateModelRequest/Response messages above
+  // exist for completeness; no rpc is registered for them.
+
+  // Text-to-speech. Only registered for plugins whose
+  // Plugin::supports_tts() is true.
+  rpc Tts(TtsRequest) returns (TtsResponse);
+
+  // Provider-specific auth flow. Only registered for plugins that
+  // override Plugin::auth_consumer_fn.
+  rpc Auth(AuthRequest) returns (AuthResponse);
+}

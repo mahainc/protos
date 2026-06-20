@@ -1,0 +1,900 @@
+syntax = "proto3";
+
+package asyncify.tcg;
+
+import "google/protobuf/struct.proto";
+import "codegen.proto";
+
+option swift_prefix = "Tcg";
+
+enum Game {
+  option (asyncify.codegen.gen_arg_string) = true;
+  GAME_UNSPECIFIED = 0;
+  POKEMON = 1;
+  POKEMON_JP = 2;
+  MAGIC_THE_GATHERING = 3 [(asyncify.codegen.arg_string) = "MTG"];
+  ONE_PIECE = 4;
+  LORCANA = 5;
+  YUGIOH = 6;
+  GENERIC = 99;
+}
+
+enum Condition {
+  // No `gen_arg_string` — Rust's parse_add_items reads NM/LP/MP/HP/DMG
+  // (now also the proto-JSON spellings as inbound aliases) but no Swift
+  // call site needs the round-trip mapping yet. Annotate when needed.
+  CONDITION_UNSPECIFIED = 0;
+  NEAR_MINT = 1;
+  LIGHTLY_PLAYED = 2;
+  MODERATELY_PLAYED = 3;
+  HEAVILY_PLAYED = 4;
+  DAMAGED = 5;
+}
+
+enum Finish {
+  option (asyncify.codegen.gen_arg_string) = true;
+  // Mechanical default works for every value (FINISH_FOIL → FOIL,
+  // FINISH_UNSPECIFIED → "").
+  FINISH_UNSPECIFIED = 0;
+  NORMAL = 1;
+  FOIL = 2;
+  REVERSE_HOLO = 3;
+  HOLO = 4;
+  ETCHED = 5;
+  PARALLEL = 6;
+}
+
+enum AnalyticsWindow {
+  option (asyncify.codegen.gen_arg_string) = true;
+  // Wire fallback when Swift decodes an unknown enum value — wire
+  // already accepts these short labels; "3M" mirrors the existing
+  // hand-written default.
+  option (asyncify.codegen.unrecognized_arg_string) = "3M";
+  ANALYTICS_WINDOW_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = "ALL_TIME"];
+  ONE_DAY = 1      [(asyncify.codegen.arg_string) = "1D"];
+  ONE_WEEK = 2     [(asyncify.codegen.arg_string) = "1W"];
+  ONE_MONTH = 3    [(asyncify.codegen.arg_string) = "1M"];
+  THREE_MONTHS = 4 [(asyncify.codegen.arg_string) = "3M"];
+  SIX_MONTHS = 5   [(asyncify.codegen.arg_string) = "6M"];
+  ONE_YEAR = 6     [(asyncify.codegen.arg_string) = "1Y"];
+  MAX = 7;
+}
+
+enum BreakdownFacet {
+  option (asyncify.codegen.gen_arg_string) = true;
+  option (asyncify.codegen.unrecognized_arg_string) = "BY_SET";
+  BREAKDOWN_FACET_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = "BY_SET"];
+  BY_SET = 1;
+  BY_RARITY = 2;
+  BY_GAME = 3;
+  BY_FINISH = 4;
+}
+
+// Trend / change direction. Used wherever a single number (gain, price
+// diff, breakdown movement) needs a canonical sign tag the host can
+// switch on (arrow icon, color) without parsing a percentage string.
+enum MoverDirection {
+  MOVER_DIRECTION_UNSPECIFIED = 0;
+  MOVER_DIRECTION_UP = 1;
+  MOVER_DIRECTION_DOWN = 2;
+  MOVER_DIRECTION_FLAT = 3;
+}
+
+message Variant {
+  string id = 1;
+  Finish finish = 2;
+  optional string grade = 3;
+}
+
+message Money {
+  string amount = 1;
+  string currency = 2;
+}
+
+message PricePoint {
+  string at = 1;
+  Money price = 2;
+  optional Finish finish = 3;
+  optional string grade = 4;
+}
+
+message BuyLink {
+  string url = 1;
+  optional string source = 2;
+  Money price = 3;
+}
+
+// One price row for a specific finish+grade printing of a card. Agnostic
+// across providers; `grade_label` is the human-resolved grade name (e.g.
+// "PSA 9", "Ungraded") so the host renders the RAW/GRADED tabs without
+// performing a grade-scale lookup of its own.
+message GradePrice {
+  Variant variant = 1;                              // finish + grade id combo
+  optional string grade_label = 2;                  // resolved label, e.g. "PSA 9"
+  Money market_price = 3;                           // current price for this row
+  Money market_price_diff = 4;                      // absolute change vs prior snapshot
+  optional string market_price_percentage_diff = 5; // % change, decimal string
+  optional string image_url = 6;                    // slab/variant image when provided
+}
+
+// One graded-population point for the "POP" tab — the count of copies known
+// graded at `grade_label` on date `at`. The POP tab plots these as
+// population-over-time lines (multiple points per grade), so `at` is set for
+// every point.
+message GradePopulation {
+  optional string grade_label = 1;  // e.g. "PSA 10"
+  int32 count = 2;                  // graded population at this grade on `at`
+  optional string at = 3;           // ISO-8601 date of this population snapshot
+}
+
+message Card {
+  string id = 1;
+  string name = 2;
+  Game game = 3;
+  optional string set_name = 4;
+  optional string set_id = 5;
+  optional string number = 6;
+  optional string rarity = 7;
+  optional string image_url = 8;
+  Money market_price = 9;
+  Money market_price_diff = 10;
+  optional string market_price_percentage_diff = 11;
+  bool is_card = 12;
+  repeated Variant variants = 13;
+  google.protobuf.Struct metadata = 15;
+}
+
+message ScanRequest {
+  // Guest account id. Sourced from the wasm-internal session cache, NOT
+  // from the host. The session token is minted/held inside the module and
+  // never crosses the boundary (see field 2, reserved).
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+  string image_base64 = 3;
+  Game game = 4;
+}
+
+message ScanResponse {
+  int32 scans_remaining = 1;
+  repeated CardMatch matches = 2;
+}
+
+message CardMatch {
+  Card card = 1;
+  optional double confidence = 2;
+}
+
+message CatalogDetailRequest {
+  string card_id = 1;
+  optional string currency = 2;
+}
+
+message CatalogDetailResponse {
+  Card card = 1;
+  repeated PricePoint price_history = 2;
+  repeated BuyLink buy_links = 3;
+  repeated Card related = 4;
+  repeated GradePrice raw_prices = 5;      // RAW tab — ungraded finish rows
+  repeated GradePrice graded_prices = 6;   // GRADED tab — per-grade price rows
+  repeated GradePopulation population = 7;  // POP tab — population-over-time points per grade
+  optional int32 owned_count = 8;          // quantity the guest already owns
+}
+
+// Request for a card's recent sold listings (the "View sold listings" sheet,
+// Figma node 15:840).
+message SoldListingsRequest {
+  string card_id = 1;
+  // Filter to one grade's sales (the radio-selected grade tile). Empty = all
+  // grades. When set, `sub_type` must also be set.
+  optional string grade = 2;
+  // Filter to one printing/variant, e.g. "Foil"/"Holofoil" (the VARIANT
+  // selector). Empty = all variants.
+  optional string sub_type = 3;
+  // Pagination: 0-based offset into the recent-sales list, and max rows to
+  // return. Both omitted = the provider's default (full list).
+  optional int32 offset = 4;
+  optional int32 limit = 5;
+}
+
+// One recent sold listing for a card — a single completed sale on an external
+// marketplace (eBay / PWCC / …). Provider-agnostic; all marketplace-JSON
+// mapping stays in Rust.
+message SoldListing {
+  string id = 1;                       // provider listing id
+  string marketplace = 2;              // e.g. "eBay", "PWCC"
+  string title = 3;                    // sale type label, e.g. "Fixed Price", "Auction", "Best Offer"
+  optional string grade_label = 4;     // resolved grade, e.g. "PSA 10" (from grade id via scales)
+  optional string grade = 12;          // raw provider grade id (round-tripped as the grade filter)
+  optional string sub_type = 5;        // printing/variant label, e.g. "Holofoil", "Foil"
+  optional string sold_date = 6;       // human date string as the provider returns it, e.g. "Jun 09, 2026"
+  Money price = 7;                     // final sold price
+  optional Money original_price = 8;   // pre-discount/list price when shown struck-through
+  optional int32 bid_count = 9;        // auction bid count when applicable
+  optional string url = 10;            // external listing URL
+  optional string image_url = 11;      // marketplace logo image
+}
+
+// Response for the sold-listings sheet. `search_url` is the provider's eBay
+// completed-sold search deep link (always present); `listings` are the recent
+// individual sales used for the per-marketplace rows + grade tiles.
+message SoldListingsResponse {
+  string search_url = 1;
+  repeated SoldListing listings = 2;
+  // True when a full `limit`-sized page was returned, i.e. more rows likely
+  // exist at the next offset (the provider returns no explicit total). False
+  // when fewer than `limit` came back, or no limit was requested.
+  bool has_more = 3;
+}
+
+message CatalogBrowseRequest {
+  optional int32 page = 1;
+  optional int32 limit = 2;
+  Game game = 3;
+  optional string query = 4;
+  // Sort by one of the ids returned by SearchFiltersResponse.sort_options
+  // (e.g. "price", "productName", "trendingToday"). Omit for server default.
+  optional string sort_id = 5;
+  // True = ascending direction; false = descending. Honored only when
+  // `sort_id` is set.
+  optional bool sort_ascending = 6;
+  // Filter ids from SearchFiltersResponse.filters (any combination of
+  // game categories and semantic filters). Empty = no filter.
+  repeated string filter_ids = 7;
+  // Scope results to a single catalog group / set (e.g. tapping a tile in
+  // the "Show Sets" sheet). The id is `CardSet.id` from `ListSets`. Empty
+  // = no group scope. Sent verbatim as the provider's `groupId` URL param.
+  optional string set_id = 8;
+}
+
+message CatalogBrowseResponse {
+  repeated Card cards = 1;
+  optional int32 page = 2;
+  optional int32 total = 3;
+}
+
+// Canonical semantic class of a filter. Lets the host pattern-match a
+// filter's meaning without knowing provider-specific id strings (e.g.
+// render the Category section as game tiles, gate Pro filters with the
+// Pro UI, show a price slider for PRICE_RANGE). Each plugin tags every
+// filter it returns; new providers add no new Swift code.
+enum FilterKind {
+  FILTER_KIND_UNSPECIFIED = 0;
+  FILTER_KIND_GAME = 1;             // game/franchise (Pokemon, Magic, …); `game` is set
+  FILTER_KIND_CARD_TYPE = 2;        // Cards Only / Sealed Only
+  FILTER_KIND_WATCHLIST = 3;        // single toggle: items in watchlist
+  FILTER_KIND_OWNERSHIP = 4;        // Owned / Not Owned (mutex)
+  FILTER_KIND_GRADED = 5;           // Graded / Ungraded (mutex)
+  FILTER_KIND_LANGUAGE = 6;         // en / jp / cn / …
+  FILTER_KIND_PRICE_RANGE = 7;      // range filter (min/max)
+  FILTER_KIND_QUANTITY_RANGE = 8;   // range filter (min/max)
+  FILTER_KIND_PRICE_PAID = 9;       // Has price paid / no price paid (mutex)
+  FILTER_KIND_PRICE_OVERRIDE = 10;  // Has price override
+  FILTER_KIND_LISTING_TYPE = 11;    // Auction / Buy Now / Live shopping
+  FILTER_KIND_OTHER = 99;           // catch-all (provider extension)
+}
+
+// Canonical semantic class of a sort option. Lets the host show the
+// right icon and asc/desc labels regardless of provider id naming
+// ("price" vs "price_high_low" vs "marketPriceDesc" all → SORT_KIND_PRICE).
+enum SortKind {
+  SORT_KIND_UNSPECIFIED = 0;
+  SORT_KIND_PRICE = 1;
+  SORT_KIND_NAME = 2;
+  SORT_KIND_TRENDING = 3;
+  SORT_KIND_DATE_ADDED = 4;
+  SORT_KIND_RELEASE_DATE = 5;
+  SORT_KIND_QUANTITY = 6;
+  SORT_KIND_OTHER = 99;
+}
+
+// One filter chip presented in the search UI. Provider-agnostic — the
+// provider's raw filter id stays in `id` (used as-is when sending the
+// selection back via CatalogBrowseRequest.filter_ids), the host renders
+// the human label (`name`/`display_name`) and decides where to show each
+// filter from `quick_filter` (true = horizontal pill / toolbar
+// quick-filter; false = secondary filter sheet).
+//
+// `kind` is the canonical semantic class the host pattern-matches on
+// (see FilterKind). `game` is set only when `kind == FILTER_KIND_GAME` —
+// it carries the canonical Game enum so Swift can pick the right icon
+// without depending on provider id naming.
+message SearchFilter {
+  string id = 1;
+  string name = 2;
+  optional string display_name = 3;
+  optional string image_url = 4;
+  optional string icon_image_url = 5;
+  bool quick_filter = 6;
+  optional string tier = 7;          // "free" / "pro"
+  FilterKind kind = 8;
+  optional Game game = 9;            // set when kind == FILTER_KIND_GAME
+}
+
+// One sort option the search results can be sorted by. Provider-agnostic —
+// the host renders `display_name` and the asc/desc labels (e.g. "Low to High"
+// / "High to Low") in its UI; sending the option back is keyed by `id`.
+// `kind` lets the host pick the right icon (price tag, alphabet, fire…)
+// without matching on provider id strings.
+message SortOption {
+  string id = 1;                       // provider id, e.g. "price"
+  string display_name = 2;             // human label, e.g. "Price"
+  optional string asc_label = 3;       // ascending direction label
+  optional string desc_label = 4;      // descending direction label
+  optional string asc_icon_url = 5;
+  optional string desc_icon_url = 6;
+  SortKind kind = 7;
+}
+
+// A group of related filters surfaced as one section in the Filters sheet
+// (e.g. "Product Type", "Graded Cards", "Category" which holds the games).
+message SearchFilterCategory {
+  string title = 1;                 // section header, e.g. "Product Type"
+  optional string subtitle = 2;     // descriptive subtitle
+  bool pro = 3;                     // true = locked behind a Pro subscription
+  bool catalog_search = 4;          // visible in the catalog search screen
+  bool portfolio_search = 5;        // visible in the portfolio screen
+  bool showcase_search = 6;
+  bool marketplace_search = 7;
+  repeated SearchFilter filters = 8;
+}
+
+// One mutual-exclusivity group — selecting a filter id in this list MUST
+// clear the others (e.g. ["owned", "not_owned"]).
+message FilterMutexGroup {
+  repeated string filter_ids = 1;
+}
+
+// Both the filter and sort inventories in one response — one host fetch
+// populates the entire search-chrome UI (filter menu + sort menu).
+message SearchFiltersResponse {
+  repeated SearchFilter filters = 1;
+  repeated SortOption sort_options = 2;
+  // The same filters re-grouped into sections for the Filters sheet
+  // (one section per semantic category — game pickers, condition
+  // toggles, price ranges, etc.). When present, the host should render
+  // `categories` instead of the flat `filters` list.
+  repeated SearchFilterCategory categories = 3;
+  // Mutually-exclusive id groups (e.g. owned/not_owned). Picking one
+  // clears the others in the same group.
+  repeated FilterMutexGroup mutex_groups = 4;
+}
+
+message TrendingRequest {
+  Game game = 1;
+}
+
+message TrendingResponse {
+  repeated TrendingEntry entries = 1;
+}
+
+message TrendingEntry {
+  string card_id = 1;
+  optional string score = 2;
+  optional int32 rank = 3;
+}
+
+// One available language for a Game's sets (e.g. English, Japanese, Chinese,
+// Pokédex for Pokemon). Returned alongside the set list so the host can
+// render a language picker without hard-coding which Games have multiple
+// printings.
+//
+// `code` is the provider's wire code, used as-is in
+// `ListSetsRequest.language` to swap the visible set list (verified codes:
+// "en", "jp", "cn", "dex" — the last is Pokemon-only, the master National
+// Pokédex "set" rather than a real language). `description` is the human
+// label, e.g. "English", "Japanese". `order_number` is the provider's
+// preferred display ordering — render ascending.
+message SetLanguage {
+  string code = 1;
+  string description = 2;
+  int32 order_number = 3;
+}
+
+// One TCG set (catalog group / expansion). Provider-agnostic — the host
+// renders `name` + `image_url` + `release_date`; round-trips `id` as the
+// `set_id` filter when the user taps a tile to drill into the set's cards.
+//
+// `owned_count` and `total_value` are user-scoped (filled when the request
+// carried an `account_id` + `collection_id`); both default to "0" / 0 for
+// anonymous browsing. The provider returns counts as strings; the proto
+// surfaces them as `int32` since real-world set sizes fit comfortably.
+message CardSet {
+  // Provider's catalog group id. Opaque round-trip key — pass this back as
+  // `set_id` on `CatalogBrowseRequest` to scope a search to this set.
+  // Note language partitioning: id ranges are language-specific for some
+  // providers (e.g. Collectr puts EN/JP One Piece sets in `24xxx` but CN
+  // Pokemon sets in `1_000_xxx`), so the host must remember which language
+  // it requested when round-tripping.
+  string id = 1;
+  // Display name, e.g. "The Time of Battle".
+  string name = 2;
+  // Total distinct cards printed in the set.
+  int32 card_count = 3;
+  // Provider's preferred display ordering. Higher = newer; sort descending
+  // to match the in-app "newest first" set list.
+  int32 order_number = 4;
+  // CDN URL of the set's cover image (booster pack / expansion logo).
+  optional string image_url = 5;
+  // ISO-8601 timestamp when the set released (e.g.
+  // "2026-06-12T00:00:00.000Z"). Empty when the provider doesn't expose one
+  // (e.g. Pokemon's `dex` master Pokédex "set").
+  optional string release_date = 6;
+  // Web-friendly slug for deep-linking into the provider's web catalog,
+  // e.g. "the-time-of-battle".
+  optional string web_slug = 7;
+  // Distinct cards from this set the guest owns in the requested
+  // collection. 0 for anonymous browsing.
+  int32 owned_count = 8;
+  // Aggregate market value of the guest's holdings in this set, priced in
+  // the requested `currency`. `amount` is "0" for anonymous browsing.
+  Money total_value = 9;
+}
+
+// One Game's category-level metadata returned by `ListSets`. Carries the
+// hero image + canonical name for the category header on the "Show Sets"
+// screen — saves the host a separate category lookup.
+message CategoryDetails {
+  string name = 1;
+  optional string image_url = 2;
+}
+
+// "Show Sets" — list every catalog group (set / expansion) under a Game,
+// optionally folded against a collection's owned counts + market value.
+// Backs the in-app flow: quick-filter chip → Show Sets button → set list.
+message ListSetsRequest {
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+  // Collection to fold per-set ownership + value into the response. Empty
+  // = the guest's default collection (resolved inside Rust from the
+  // cached session).
+  optional string collection_id = 3;
+  // Game whose sets to enumerate. Required.
+  Game game = 4;
+  // Language filter (e.g. "en", "jp", "cn", "dex"). Codes come from a
+  // prior `ListSetsResponse.languages[].code`. Empty = the provider's
+  // default language for the Game. Unrecognized codes silently return an
+  // empty `sets[]` (verified live).
+  optional string language = 5;
+  // ISO-4217 currency for `CardSet.total_value` and the response's echoed
+  // `currency`. Defaults to "USD" inside Rust.
+  optional string currency = 6;
+  // true = aggregate ownership across every collection on the account
+  // (not just the one named in `collection_id`).
+  optional bool all_collections = 7;
+}
+
+// Response for `ListSets`. Always includes the full `languages[]` for the
+// Game even when filtering by one — so the host can render the language
+// picker on the first fetch and toggle between codes without a separate
+// call.
+message ListSetsResponse {
+  repeated CardSet sets = 1;
+  repeated SetLanguage languages = 2;
+  // Game-level metadata used as the "Show Sets" screen header (hero image
+  // + display name).
+  CategoryDetails category = 3;
+  // ISO-4217 currency the `CardSet.total_value` rows are priced in.
+  // Echoes the request value when the provider honored it, otherwise the
+  // provider's native currency.
+  string currency = 4;
+}
+
+message AccountInfoRequest {
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+}
+
+message AccountInfoResponse {
+  Account account = 1;
+}
+
+message Account {
+  string id = 1;
+  string handle = 2;
+  optional string nickname = 3;
+  optional string email = 4;
+  string tier = 5;
+  string default_currency = 6;
+  optional string total_cards = 7;
+  optional string total_followers = 8;
+  optional string total_following = 9;
+  google.protobuf.Struct metadata = 15;
+}
+
+message ListCollectionsRequest {
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+}
+
+message ListCollectionsResponse {
+  repeated Collection collections = 1;
+}
+
+message CreateCollectionRequest {
+  string name = 1;
+  bool is_public = 2;
+}
+
+message UpdateCollectionRequest {
+  string collection_id = 1;
+  optional string name = 2;
+  optional bool is_public = 3;
+}
+
+message DeleteCollectionRequest {
+  string collection_id = 1;
+}
+
+message Collection {
+  string id = 1;
+  string name = 2;
+  bool is_default = 3;
+  optional string color = 4;
+  bool is_public = 5;
+  optional int32 ordering = 6;
+}
+
+message CollectionSummaryRequest {
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+}
+
+message CollectionSummaryResponse {
+  string total_cards = 1;
+  string total_sealed = 2;
+  string total_graded = 3;
+  Money total_value = 4;
+}
+
+message CollectionItemsRequest {
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+  string collection_id = 3;
+  optional string currency = 4;
+  optional bool all_collections = 5;
+}
+
+message CollectionItemsResponse {
+  repeated CollectionItem items = 1;
+}
+
+message CollectionItem {
+  Card card = 1;
+  Variant variant = 2;
+  int32 quantity = 3;
+  Condition condition = 4;
+  Money paid_price = 5;
+  Money market_price = 6;
+  // Provider holding-line id used to address this row in update/remove
+  // actions. Opaque to the host.
+  optional string id = 7;
+  // Acquired/purchase date as an ISO-8601 date string (YYYY-MM-DD), when
+  // the provider exposes one.
+  optional string acquired_at = 8;
+  // Optional user note attached to this holding.
+  optional string note = 9;
+}
+
+// Read the full editable detail of one holding line — the editable fields
+// (paid_price, quantity, acquired_at, note, condition) aren't all on the
+// collection-list response, so the edit sheet fetches them on open.
+message HoldingDetailRequest {
+  string holding_id = 1;
+}
+
+message HoldingDetailResponse {
+  CollectionItem item = 1;
+}
+
+// Update one editable holding line. `holding_id` is the opaque id from
+// `CollectionItem.id`. Fields left unset preserve the current value.
+message UpdateHoldingRequest {
+  string holding_id = 1;
+  optional string paid_price = 2;
+  optional string acquired_at = 3;  // ISO-8601 YYYY-MM-DD
+  optional string note = 4;
+  optional int32 quantity = 5;
+}
+
+message UpdateHoldingResponse {
+  bool ok = 1;
+  CollectionItem item = 2;
+}
+
+// Remove an entire holding line. The host provides the addressable fields
+// taken from the existing CollectionItem so the executor doesn't need a
+// round-trip to look them up.
+message RemoveHoldingRequest {
+  string holding_id = 1;
+  string card_id = 2;      // catalog product id for URL path
+  Variant variant = 3;     // finish + grade for the request body
+  int32 quantity = 4;      // remove this many units (the provider DELETE
+                            // decrements by 1 per call, so the executor
+                            // loops `quantity` times)
+}
+
+message RemoveHoldingResponse {
+  bool ok = 1;
+}
+
+message AddCardsRequest {
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+  string collection_id = 3;
+  repeated AddCardItem items = 4;
+}
+
+message AddCardItem {
+  string card_id = 1;
+  optional string variant_id = 2;
+  int32 quantity = 3;
+  Condition condition = 4;
+  Finish finish = 5;
+  optional string paid_price = 6;
+}
+
+message AddCardsResponse {
+  bool ok = 1;
+  reserved 2;
+  reserved "metadata";
+}
+
+message PortfolioPerformanceRequest {
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+  string collection_id = 3;
+  optional string currency = 4;
+  optional bool all_collections = 5;
+  AnalyticsWindow window = 6;
+}
+
+message PortfolioPerformanceResponse {
+  Money cost_basis = 1;
+  Money market_value = 2;
+  Money gain = 3;
+  string roi_percentage = 4;
+  int32 card_count = 5;
+  AnalyticsWindow window = 6;
+}
+
+message ValueOverTimeRequest {
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+  string collection_id = 3;
+  AnalyticsWindow window = 4;
+  optional string currency = 5;
+  optional bool all_collections = 6;
+}
+
+message ValueOverTimeResponse {
+  repeated ValuePoint market_series = 1;
+  repeated ValuePoint cost_basis_series = 2;
+  Money peak_value = 3;
+  string peak_at = 4;
+  bool peak_is_current = 5;
+  AnalyticsWindow window = 6;
+  // Signed P&L line (market − cost basis) over time.
+  //
+  // Two sources, in priority order:
+  //  1. Server-blessed series when the provider exposes one.
+  //  2. Client-derived: market_series[i] minus the current cost basis
+  //     when the server doesn't. Cost basis is held constant in the
+  //     derivation, so the approximation is accurate for holdings
+  //     owned the full window but understates pre-purchase P&L for
+  //     cards added mid-window. `pnl_series_is_derived = true` flags
+  //     the fallback so the host can show an "Approx." affordance.
+  //
+  // Empty when no holdings exist and no market history is available;
+  // the host renders an empty state.
+  repeated ValuePoint unrealized_pnl_series = 7;
+  // true → `unrealized_pnl_series` was computed on the client because
+  // the provider didn't supply a server-blessed P&L series. Hosts may
+  // surface this distinction (e.g. paid-tier upsell when present).
+  bool pnl_series_is_derived = 8;
+  // Server-curated themed carousels for the Overview tab. Each section
+  // is a horizontal strip of cards under one heading (e.g. "Most
+  // Valuable" sorted by price DESC). Empty when the provider doesn't
+  // surface carousels.
+  repeated CarouselSection carousel = 9;
+}
+
+// One themed strip of cards rendered as a horizontal carousel on the
+// Overview tab. Title is the section header (e.g. "Most Valuable").
+// `kind` is the canonical sort axis (host pattern-matches it for icons
+// / copy), `sort_id` keeps the provider's raw id for opaque round-trip,
+// and `sort_ascending` mirrors the bool used elsewhere (true = lowest
+// first; false = highest first).
+message CarouselSection {
+  string title = 1;
+  optional string sort_id = 2;
+  optional bool sort_ascending = 3;
+  repeated Card cards = 4;
+  // Canonical sort tag — same enum SortOption uses (SORT_KIND_PRICE,
+  // SORT_KIND_NAME, …). UNSPECIFIED when the provider doesn't supply
+  // a recognized sort axis; host can still render the section by title.
+  SortKind kind = 5;
+}
+
+message ValuePoint {
+  string at = 1;
+  Money value = 2;
+}
+
+message TopMoversRequest {
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+  string collection_id = 3;
+  AnalyticsWindow window = 4;
+  optional int32 limit = 5;
+  optional string currency = 6;
+  optional bool all_collections = 7;
+}
+
+message TopMoversResponse {
+  repeated Mover movers = 1;
+  AnalyticsWindow window = 2;
+}
+
+message Mover {
+  Card card = 1;
+  Variant variant = 2;
+  Money current_price = 3;
+  Money window_open_price = 4;
+  Money price_change = 5;
+  string change_percentage = 6;
+}
+
+message PerformanceBreakdownRequest {
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+  string collection_id = 3;
+  BreakdownFacet facet = 4;
+  AnalyticsWindow window = 5;
+  optional string currency = 6;
+  optional bool all_collections = 7;
+}
+
+message PerformanceBreakdownResponse {
+  repeated BreakdownGroup groups = 1;
+  BreakdownFacet facet = 2;
+  AnalyticsWindow window = 3;
+}
+
+message BreakdownGroup {
+  string label = 1;
+  int32 card_count = 2;
+  Money market_value = 3;
+  // % change as decimal string (no sign). The host renders sign via
+  // `direction` below — the string is just the magnitude formatting.
+  string change_percentage = 4;
+  // Canonical sign tag for `change_percentage`. Host pattern-matches
+  // (UP=green/up-arrow, DOWN=red/down-arrow, FLAT=neutral) without
+  // parsing the percentage string.
+  MoverDirection direction = 5;
+  // 0..1 — the row's bar width as a fraction of the group's max market
+  // value. Host renders a horizontal bar; omit to skip the bar.
+  optional double bar_fill = 6;
+}
+
+// Unrealized P&L for the active collection — totals plus a per-Game
+// breakdown. Providers surface aggregates plus one canonical breakdown
+// axis (by Game). Set / rarity / finish rollups are computed by the
+// task layer from per-card history (see PerformanceBreakdown). No time
+// series — that's on ValueOverTime.
+message ProfitLossRequest {
+  string account_id = 1;
+  reserved 2;
+  reserved "session_token";
+  string collection_id = 3;
+  // ISO-4217 currency to price the response in. Providers that support
+  // currency conversion echo it back in the response; otherwise the
+  // response reports its native currency.
+  optional string currency = 4;
+}
+
+message ProfitLossResponse {
+  // ISO-4217 currency the rows are priced in.
+  string currency = 1;
+  // Aggregate P&L across the entire collection.
+  ProfitLossSummary summary = 2;
+  // Per-Game breakdown rows. Empty when the collection has no holdings.
+  repeated ProfitLossRow rows = 3;
+}
+
+message ProfitLossSummary {
+  // Sum of paid_price × quantity across the collection (cost basis).
+  Money cost_basis = 1;
+  // Current market value across the collection.
+  Money market_value = 2;
+  // Unrealized gain (market_value − cost_basis); signed amount string.
+  Money gain = 3;
+  // ROI percentage as decimal string (e.g. "371.475" = +371.475 %).
+  string roi_percentage = 4;
+}
+
+message ProfitLossRow {
+  // Canonical Game tag for the row. Plugins map their provider-native
+  // category name onto the asyncify Game enum; falls back to
+  // GAME_UNSPECIFIED for games not in the enum (still display via
+  // `category_name`).
+  Game game = 1;
+  // Provider's raw category id. Opaque round-trip key for re-querying
+  // by this game; primary semantic is carried by `game` above.
+  string category_id = 2;
+  // Provider's display name. Used as the row label when `game` is
+  // GAME_UNSPECIFIED.
+  string category_name = 3;
+  Money cost_basis = 4;
+  Money market_value = 5;
+  Money gain = 6;
+  string roi_percentage = 7;
+}
+
+
+// Empty request for actions that take no arguments. Kept as a typed
+// message so the service signature stays well-formed without resorting
+// to google.protobuf.Empty (avoids the extra import).
+message SearchFiltersRequest {}
+
+// =====================================================================
+// Service — TCG actions reachable via gRPC-style method names.
+//
+// Each rpc binds a request/response pair to a method name. The wasm
+// dispatcher routes by method name when the wire `action_id` contains
+// '/' (e.g. "asyncify.tcg.TcgService/ProfitLoss"), picking the
+// concrete provider via the persisted provider_strategy. The legacy
+// UUID action_id path stays valid for every rpc — both routes land in
+// the same executor on the Rust side.
+//
+// Hosts that adopt this service skip the per-action listActions
+// discovery: the rpc IS the contract, parameterized by its request
+// type.
+//
+// Create/Update/Delete Collection rpcs return the updated full
+// `ListCollectionsResponse` (the mutating executors send back the
+// post-mutation list so callers don't need to re-fetch).
+// =====================================================================
+service TcgService {
+  // Bootstrap is intentionally not surfaced — auth is minted silently
+  // inside the wasm module, not driven by the host.
+
+  // Catalog / lookup ------------------------------------------------
+  rpc Scan(ScanRequest) returns (ScanResponse);
+  rpc CatalogDetail(CatalogDetailRequest) returns (CatalogDetailResponse);
+  rpc SoldListings(SoldListingsRequest) returns (SoldListingsResponse);
+  rpc CatalogBrowse(CatalogBrowseRequest) returns (CatalogBrowseResponse);
+  rpc Trending(TrendingRequest) returns (TrendingResponse);
+  rpc SearchFilters(SearchFiltersRequest) returns (SearchFiltersResponse);
+  rpc ListSets(ListSetsRequest) returns (ListSetsResponse);
+  rpc AccountInfo(AccountInfoRequest) returns (AccountInfoResponse);
+
+  // Collections -----------------------------------------------------
+  rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
+  rpc CreateCollection(CreateCollectionRequest) returns (ListCollectionsResponse);
+  rpc UpdateCollection(UpdateCollectionRequest) returns (ListCollectionsResponse);
+  rpc DeleteCollection(DeleteCollectionRequest) returns (ListCollectionsResponse);
+  rpc CollectionSummary(CollectionSummaryRequest) returns (CollectionSummaryResponse);
+  rpc CollectionItems(CollectionItemsRequest) returns (CollectionItemsResponse);
+  rpc AddCards(AddCardsRequest) returns (AddCardsResponse);
+  rpc HoldingDetail(HoldingDetailRequest) returns (HoldingDetailResponse);
+  rpc UpdateHolding(UpdateHoldingRequest) returns (UpdateHoldingResponse);
+  rpc RemoveHolding(RemoveHoldingRequest) returns (RemoveHoldingResponse);
+
+  // Analytics -------------------------------------------------------
+  rpc PortfolioPerformance(PortfolioPerformanceRequest) returns (PortfolioPerformanceResponse);
+  rpc ValueOverTime(ValueOverTimeRequest) returns (ValueOverTimeResponse);
+  rpc TopMovers(TopMoversRequest) returns (TopMoversResponse);
+  rpc PerformanceBreakdown(PerformanceBreakdownRequest) returns (PerformanceBreakdownResponse);
+  rpc ProfitLoss(ProfitLossRequest) returns (ProfitLossResponse);
+}

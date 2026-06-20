@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package asyncify.browser;
+
+option swift_prefix = "BrowserBrowser";
+
+message BrowserRequest {
+  string url = 1;
+  string domain = 2;
+}
+
+message BrowserResponse {
+  string cookies = 1;
+}
+

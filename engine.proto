@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package asyncify.engine;
+
+option swift_prefix = "Engine";
+
+enum CallID {
+  CALL_ID_UNSPECIFIED = 0;
+  CALL_ID_GET_VERSION = 1;
+  CALL_ID_INITIALIZE = 2;
+}
+
+message Version {
+  string id = 1;
+  string name = 2;
+  optional string etag = 3;
+  optional string sha = 4;
+  optional string url = 5;
+  Version next = 6;
+  optional string release_date = 7;
+}
+

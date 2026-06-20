@@ -1,0 +1,537 @@
+syntax = "proto3";
+
+import "codegen.proto";
+import "task.proto";
+
+package asyncify.livescore;
+
+option swift_prefix = "Livescore";
+
+// Livescore wire types — resynced verbatim from the VTN backend's
+// canonical `crates/scorebat-core/proto/soccer.proto` (2026-05-22).
+//
+// The wasm livescore module proxies every request to the backend
+// `/serverless/mobile/soccer/*` routes and deserializes the JSON
+// responses directly into these proto-generated Rust types, so this
+// schema MUST mirror the backend definition exactly. Only the package
+// name and `swift_prefix` differ; the message bodies are identical.
+//
+// Backend note (kept for context): these messages are generated into
+// Rust by `crates/scorebat-core/build.rs` (prost-build + protox) with
+// serde derives injected, and are the actual serialization types.
+// Field names, order and types mirror the JSON wire EXACTLY.
+//
+// The `wasm-local wrappers` block at the end is wasm-side proto
+// surface only — list/page envelopes the backend ships as untyped
+// JSON `{"data":{...}}` but which wasm needs as typed `Message`s to
+// ride `task::Task.value` as `prost_types::Any::from_msg(&value)`.
+
+// Normalized match state. Serialized on the wire as its integer value
+// (matches the codes `scorebat_core::map_status` emits from the v2cf
+// feed `s` field). Non-contiguous by design — the gaps mirror the
+// status families (1=pre, 10s=live, 20s=finished, 30s=interrupted).
+enum MatchStatus {
+  MATCH_STATUS_UNSPECIFIED = 0;
+  MATCH_STATUS_NOT_STARTED = 1;
+  MATCH_STATUS_FIRST_HALF = 10;
+  MATCH_STATUS_HALFTIME = 11;
+  MATCH_STATUS_SECOND_HALF = 12;
+  MATCH_STATUS_EXTRA_TIME = 13;
+  MATCH_STATUS_EXTRA_TIME_BREAK = 14;
+  MATCH_STATUS_PENALTIES = 15;
+  MATCH_STATUS_FULL_TIME = 20;
+  MATCH_STATUS_AFTER_EXTRA_TIME = 21;
+  MATCH_STATUS_AFTER_PENALTIES = 22;
+  MATCH_STATUS_SUSPENDED = 30;
+  MATCH_STATUS_INTERRUPTED = 31;
+  MATCH_STATUS_POSTPONED = 32;
+  MATCH_STATUS_CANCELLED = 33;
+  MATCH_STATUS_ABANDONED = 34;
+  MATCH_STATUS_WALKOVER = 35;
+  MATCH_STATUS_AWARDED = 36;
+  MATCH_STATUS_DELAYED = 37;
+}
+
+// Lifecycle trigger of a `MatchUpdate` delta. Serialized on the wire as
+// its integer value (consistent with the `*_status` fields).
+enum MatchUpdateType {
+  MATCH_UPDATE_TYPE_UNSPECIFIED = 0;
+  MATCH_UPDATE_TYPE_MATCH_SOON = 1;
+  MATCH_UPDATE_TYPE_MATCH_START = 2;
+  MATCH_UPDATE_TYPE_GOAL = 3;
+  MATCH_UPDATE_TYPE_HALFTIME = 4;
+  MATCH_UPDATE_TYPE_MATCH_END = 5;
+  MATCH_UPDATE_TYPE_STATUS_CHANGE = 6;
+}
+
+// Type of a per-match incident (in `MatchEvent`). Serialized as its
+// integer value; codes match `scorebat_core::event_type_from_str`.
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_GOAL = 1;
+  EVENT_TYPE_OWN_GOAL = 2;
+  EVENT_TYPE_PENALTY_GOAL = 3;
+  EVENT_TYPE_MISSED_PENALTY = 4;
+  EVENT_TYPE_YELLOW_CARD = 5;
+  EVENT_TYPE_RED_CARD = 6;
+  EVENT_TYPE_SECOND_YELLOW = 7;
+  EVENT_TYPE_SUBSTITUTION = 8;
+  EVENT_TYPE_VAR = 9;
+}
+
+// Pitch position of a lineup player. Codes match
+// `scorebat_core::position_from_str`.
+enum Position {
+  POSITION_UNSPECIFIED = 0;
+  POSITION_GOALKEEPER = 1;
+  POSITION_DEFENDER = 2;
+  POSITION_MIDFIELDER = 3;
+  POSITION_FORWARD = 4;
+}
+
+// Normalized match-statistic key (in `FixtureStatistic`). Codes match
+// `scorebat_core::stat_type_from_str`.
+enum StatType {
+  STAT_TYPE_UNSPECIFIED = 0;
+  STAT_TYPE_XG = 1;
+  STAT_TYPE_POSSESSION = 2;
+  STAT_TYPE_BIG_CHANCE = 3;
+  STAT_TYPE_SHOT = 4;
+  STAT_TYPE_SHOT_ON_GOAL = 5;
+  STAT_TYPE_BLOCKED_SHOT = 6;
+  STAT_TYPE_SHOT_INSIDE_BOX = 7;
+  STAT_TYPE_SHOT_OUTSIDE_BOX = 8;
+  STAT_TYPE_WOODWORK = 9;
+  STAT_TYPE_FOUL = 10;
+  STAT_TYPE_CORNER = 11;
+  STAT_TYPE_THROW_IN = 12;
+  STAT_TYPE_SAVE = 13;
+  STAT_TYPE_FREE_KICK = 14;
+  STAT_TYPE_OFFSIDE = 15;
+  STAT_TYPE_PASSES_FINAL_THIRD = 16;
+  STAT_TYPE_PASSES_FINAL_THIRD_COMPLETED = 17;
+  STAT_TYPE_TOUCHES_IN_OPPOSITION_BOX = 18;
+  STAT_TYPE_TACKLE = 19;
+  STAT_TYPE_TACKLE_COMPLETED = 20;
+  STAT_TYPE_CROSS = 21;
+  STAT_TYPE_CROSS_COMPLETED = 22;
+  STAT_TYPE_INTERCEPTION = 23;
+  STAT_TYPE_CLEARANCE = 24;
+}
+
+// Type of content to load in the WebPage action.
+enum WebPageType {
+  WEB_PAGE_TYPE_UNSPECIFIED = 0;
+  // top leagues from backend API (28 entries)
+  WEB_PAGE_TYPE_LEAGUES = 1;
+  // HD competitions from IPA bundle (101 entries)
+  WEB_PAGE_TYPE_COMPETITIONS = 2;
+  // top teams from IPA bundle (194 entries)
+  WEB_PAGE_TYPE_TEAMS = 3;
+  // fetch embed HTML by URL
+  WEB_PAGE_TYPE_PAGE = 4;
+  // home carousel discover items (curated featured content)
+  WEB_PAGE_TYPE_DISCOVERS = 5;
+  // Scorebat video highlight rows from the backend `/soccer/videos`
+  // mirror (postgres table `mobile.videos`). Each item lands in a
+  // `WebPage` with image=thumbnail, title=match headline,
+  // subtitle=competition name, url=Scorebat matchview URL,
+  // id=stable FNV hash, datetime=match kickoff (UNIX seconds).
+  // Accepts the extra filter args `video_type` (featured|livestream),
+  // `competition_id`, `team_id`, `q`, `page`, `page_size`.
+  WEB_PAGE_TYPE_VIDEOS = 6;
+  // Soccer news rows from the backend `/soccer/news` postgres feed
+  // (table `mobile.news`). Each article lands in a `WebPage` with
+  // image=image_url, title=headline, subtitle=source · author,
+  // url=canonical article URL, id=ingester-supplied article slug,
+  // datetime=`published_at` (RFC 3339 UTC) parsed to UNIX seconds.
+  // Pagination is offset-based: pass `limit` (default 30, clamp
+  // [1, 100]) and `offset` (default 0); the server-side `next_offset`
+  // cursor is collapsed away — callers detect end-of-feed when the
+  // returned row count drops below `limit`. Also accepts `q` (the
+  // existing full-text arg) for postgres `plainto_tsquery` filtering.
+  WEB_PAGE_TYPE_NEWS = 7;
+}
+
+message Country {
+  string id = 1;
+  string name = 2;
+  string iso2 = 3;
+  // flag URL
+  string image_path = 4;
+  string iso3 = 5;
+  string fifa_name = 6;
+  string continent_name = 7;
+  string continent_code = 8;
+}
+
+message League {
+  string id = 1;
+  string name = 2;
+  string country_id = 3;
+}
+
+message Team {
+  string id = 1;
+  string name = 2;
+  string image = 3;
+  string slug = 4;
+  string url = 5;
+  string country_name = 6;
+  string country_id = 7;
+  bool national = 8;
+  repeated string aka = 9;
+  repeated MatchSummary fixtures = 10;
+  repeated MatchSummary results = 11;
+  repeated League tables = 12;
+  string fetched_at = 13;
+}
+
+message Player {
+  string id = 1;
+  string name = 2;
+}
+
+message Topscorer {
+  int64 position = 1;
+  int64 total = 2;
+  Player player = 3;
+  Team team = 4;
+}
+
+message StandingRecord {
+  int64 played = 1;
+  int64 win = 2;
+  int64 draw = 3;
+  int64 lose = 4;
+  int64 goals_for = 5;
+  int64 goals_against = 6;
+}
+
+message Standing {
+  int64 position = 1;
+  int64 points = 2;
+  int64 goals_diff = 3;
+  string group_name = 4;
+  string form = 5;
+  Team participant = 6;
+  StandingRecord all = 7;
+}
+
+message CompetitionScoreline {
+  int64 count = 1;
+  int64 score1 = 2;
+  int64 score2 = 3;
+}
+
+message CompetitionStats {
+  int64 matches = 1;
+  int64 goals = 2;
+  int64 home_wins = 3;
+  int64 away_wins = 4;
+  int64 draws = 5;
+  int64 clean_sheets = 6;
+  repeated MatchSummary biggest_wins = 7;
+  repeated CompetitionScoreline common_scorelines = 8;
+  repeated Topscorer top_scorers = 9;
+  repeated Topscorer top_assists = 10;
+}
+
+message Competition {
+  int64 id = 1;
+  string name = 2;
+  string image = 3;
+  string region = 4;
+  string slug = 5;
+  int64 season_id = 6;
+  Country country = 7;
+  repeated MatchSummary fixtures = 8;
+  repeated Standing standings = 9;
+  CompetitionStats stats = 10;
+  string fetched_at = 11;
+  string url = 12;
+}
+
+// Nested `/soccer/matches` list row.
+message MatchSummary {
+  int64 id = 1;
+  Team home = 2;
+  Team away = 3;
+  Competition competition = 4;
+  int64 datetime = 5;
+  int64 score1 = 6;
+  int64 score2 = 7;
+  MatchStatus status = 8;
+  string url = 9;
+}
+
+// One side of a MatchUpdate delta: team + its pre/post score.
+message MatchUpdateSide {
+  Team team = 1;
+  int64 old_score = 2;
+  int64 new_score = 3;
+}
+
+// FCM-fanout / `/soccer/events` SSE diff event on subject
+// `events.scorebat.match-update`.
+message MatchUpdate {
+  int64 id = 1;
+  MatchUpdateSide home = 2;
+  MatchUpdateSide away = 3;
+  Competition competition = 4;
+  MatchStatus old_status = 5;
+  MatchStatus new_status = 6;
+  MatchUpdateType event_type = 7;
+  string url = 8;
+  int64 datetime = 9;
+}
+
+message Video {
+  string id = 1;
+  string title = 2;
+  string embed = 3;
+  string source_id = 4;
+  string source = 5;
+  string source_url = 6;
+  string image = 7;
+}
+
+message MatchEvent {
+  string player_id = 1;
+  string player_name = 2;
+  string participant_id = 3;
+  int64 minute = 4;
+  EventType event_type = 5;
+  string type_raw = 6;
+  string related_player_id = 7;
+  string related_player_name = 8;
+}
+
+message Lineup {
+  string player_id = 1;
+  string player_name = 2;
+  int64 jersey_number = 3;
+  Position position = 4;
+  bool is_substitute = 5;
+}
+
+message Coach {
+  string name = 1;
+}
+
+message TeamLineup {
+  Team team = 1;
+  string formation = 2;
+  repeated Lineup start_xi = 3;
+  repeated Lineup substitutes = 4;
+  Coach coach = 5;
+}
+
+message FixtureStatistic {
+  string type_name = 1;
+  string location = 2;
+  StatType stat_type = 3;
+  optional int64 value_int = 4;
+  optional string value_string = 5;
+}
+
+message Referee {
+  string name = 1;
+}
+
+message Venue {
+  // scorebat vnId
+  string id = 1;
+  // scorebat vn
+  string name = 2;
+  string city = 3;
+  // nested; same Country shape used by Competition
+  Country country = 4;
+  int32 capacity = 5;
+  // venue photo
+  string image_url = 6;
+  string surface = 7;
+  double latitude = 8;
+  double longitude = 9;
+  string address = 10;
+}
+
+message PredictionPercent {
+  string home = 1;
+  string draw = 2;
+  string away = 3;
+}
+
+message Prediction {
+  string type_id = 1;
+  string type_name = 2;
+  PredictionPercent percent = 3;
+}
+
+message Lineups {
+  TeamLineup home = 1;
+  TeamLineup away = 2;
+}
+
+message TeamH2H {
+  Team team = 1;
+  repeated MatchSummary form = 2;
+  repeated Topscorer top_contributors = 3;
+  string recent_coach = 4;
+}
+
+message H2H {
+  TeamH2H home = 1;
+  TeamH2H away = 2;
+  repeated MatchSummary between = 3;
+}
+
+// iOS Live Activity `aps.content-state` payload.
+message MatchContentState {
+  int64 match_id = 1;
+  Team home = 2;
+  Team away = 3;
+  Competition competition = 4;
+  int32 score1 = 5;
+  int32 score2 = 6;
+  MatchStatus status = 7;
+  string status_label = 8;
+  MatchUpdateType event_type = 9;
+  int64 datetime = 10;
+}
+
+// `/soccer/matches {id}` match-detail wrapper.
+message Match {
+  MatchSummary match_ = 1;
+  repeated MatchEvent events = 2;
+  Lineups lineup = 3;
+  repeated FixtureStatistic statistics = 4;
+  Referee referee = 5;
+  Venue venue = 6;
+  repeated Prediction predictions = 7;
+  repeated Video videos = 8;
+  H2H h2h = 9;
+  string fetched_at = 10;
+}
+
+// A single embed/livescore page row with list-display metadata.
+message WebPage {
+  // thumbnail/logo URL for list display
+  string image = 1;
+  // primary label (league name, team name, match title)
+  string title = 2;
+  // secondary label (country, date, competition)
+  string subtitle = 3;
+  // embed URL loaded directly in WKWebView (no-proxy)
+  string url = 4;
+  // slug identifier
+  string id = 5;
+  // UNIX timestamp; populated for Highlights items
+  int64 datetime = 6;
+}
+
+// List wrappers used as task::Task.value targets for each livescore action.
+message WebPageList {
+  repeated WebPage pages = 1;
+}
+
+message MatchSummaryList {
+  repeated MatchSummary matches = 1;
+}
+
+// =====================================================================
+// Typed request envelopes for WebpageLivescoreService.
+// All requests are stateless — Rust resolves the single registered
+// WebpageLivescorePlugin; no provider pinning needed on Swift.
+// =====================================================================
+
+message UpcomingRequest {}
+
+message ScoresByDateRequest {
+  // YYYY-MM-DD. Empty → backend uses JWT `tz` claim's today.
+  optional string date = 1;
+}
+
+message EntityByIdRequest {
+  // Slug or numeric id, depending on entity.
+  string id = 1;
+}
+
+message WebpageCompetitionsRequest {
+  // Full-text filter on name + region.
+  optional string q = 1;
+  // Server-side clamp; default 30. Track `offset + items.count`
+  // and stop when result count < limit.
+  optional int64 limit = 2;
+  // Offset-based pagination cursor.
+  optional int64 offset = 3;
+}
+
+message WebpageTeamsRequest {
+  optional string q = 1;
+  optional int64 limit = 2;
+  optional int64 offset = 3;
+  // Narrow to teams that played in this competition.
+  optional string competition_id = 4;
+}
+
+message WebpageNewsRequest {
+  optional int64 limit = 1;
+  optional int64 offset = 2;
+  // plainto_tsquery, ≤200 chars.
+  optional string q = 3;
+  // Mutually exclusive with team_id (backend XOR).
+  optional string competition_id = 4;
+  optional string team_id = 5;
+}
+
+message WebpageVideosRequest {
+  // "featured" (default) or "livestream".
+  optional string video_type = 1;
+  optional string competition_id = 2;
+  optional string team_id = 3;
+  optional string q = 4;
+  // 1-based.
+  optional int64 page = 5;
+  // Server-clamped to [1,60]; default 20.
+  optional int64 page_size = 6;
+}
+
+message WebpageByIdRequest {
+  // WebPageType numeric value (2=competitions, 3=teams).
+  int32 type = 1;
+  // Entity id.
+  string id = 2;
+}
+
+message WebpageByUrlRequest {
+  // Full URL to resolve.
+  string url = 1;
+}
+
+message LiveEventsRequest {}
+
+service WebpageLivescoreService {
+  // List endpoints — return MatchSummaryList directly.
+  rpc Upcoming(UpcomingRequest) returns (MatchSummaryList);
+  rpc ScoresByDate(ScoresByDateRequest) returns (MatchSummaryList);
+
+  // Detail endpoints — return one entity each.
+  rpc CompetitionDetail(EntityByIdRequest) returns (Competition);
+  rpc TeamDetail(EntityByIdRequest) returns (Team);
+  rpc MatchDetail(EntityByIdRequest) returns (Match);
+
+  // Webpage list endpoints — share the same underlying action but
+  // differ by `type` body field. Each rpc has its own typed args.
+  rpc WebpageCompetitions(WebpageCompetitionsRequest) returns (WebPageList);
+  rpc WebpageTeams(WebpageTeamsRequest) returns (WebPageList);
+  rpc WebpageNews(WebpageNewsRequest) returns (WebPageList);
+  rpc WebpageVideos(WebpageVideosRequest) returns (WebPageList);
+  rpc WebpageById(WebpageByIdRequest) returns (WebPageList);
+  rpc WebpageByUrl(WebpageByUrlRequest) returns (WebPageList);
+
+  // SSE — caller uses *Task variant to drive streaming.
+  rpc LiveEvents(LiveEventsRequest) returns (asyncify.task.Task) {
+    option (asyncify.codegen.skip_flow_kit) = true;
+  };
+}

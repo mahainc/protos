@@ -1,0 +1,199 @@
+syntax = "proto3";
+
+package asyncify.calories;
+
+import "google/protobuf/struct.proto";
+import "types.proto";
+
+option swift_prefix = "Calories";
+
+/// Main food analysis result — normalized across all providers.
+/// Returned by Analyze (text/image), Barcode, and Ingredient actions.
+message FoodResult {
+  /// Display name of the food (e.g. "Chicken Caesar Salad").
+  string name = 1;
+  /// Total calories in kcal for the analyzed portion.
+  double calories = 2;
+  /// Total protein in grams.
+  double protein = 3;
+  /// Total carbohydrates in grams.
+  double carbs = 4;
+  /// Total fats in grams.
+  double fats = 5;
+  /// Total sugar in grams (not all providers return this).
+  optional double sugar = 6;
+  /// Total dietary fiber in grams.
+  optional double fiber = 7;
+  /// Total sodium in milligrams.
+  optional double sodium = 8;
+  /// Number of servings the macros represent (e.g. 1.0 = single serving).
+  optional double servings = 9;
+  /// Provider's healthiness rating on a 1-10 scale (higher = healthier).
+  optional int32 health_score = 10;
+  /// Breakdown of individual ingredients with per-ingredient macros.
+  repeated Ingredient ingredients = 11;
+  /// Provider-specific extra data not captured by typed fields.
+  google.protobuf.Struct metadata = 15;
+}
+
+/// A single ingredient within a FoodResult breakdown.
+message Ingredient {
+  /// Ingredient name (e.g. "romaine lettuce", "grilled chicken").
+  string name = 1;
+  /// Calories in kcal for this ingredient's portion.
+  double calories = 2;
+  /// Protein in grams.
+  double protein = 3;
+  /// Carbohydrates in grams.
+  double carbs = 4;
+  /// Fats in grams.
+  double fats = 5;
+  /// Quantity of this ingredient (e.g. 150.0 for 150g).
+  optional double amount = 6;
+  /// Unit of the amount (e.g. "g", "ml", "oz", "cup").
+  optional string unit = 7;
+  /// Provider's confidence in this ingredient identification (0.0-1.0).
+  optional double confidence = 8;
+}
+
+/// Health score / analytics result for a specific food item.
+/// Returned by the Health Score action.
+message HealthScoreResult {
+  /// Overall health rating on a 1-10 scale (higher = healthier).
+  int32 rating = 1;
+  /// Nutritional balance assessment (e.g. "Well-balanced", "High in carbs").
+  string balance = 2;
+  /// Satiety/fullness assessment (e.g. "Very filling", "Light meal").
+  string fullness = 3;
+  /// How well the food fits typical health goals (e.g. "Good for weight loss").
+  string goal_fit = 4;
+  /// Summary message from the provider's analysis.
+  string message = 5;
+  /// Actionable improvement tips (e.g. "Add more vegetables", "Reduce sodium").
+  repeated string tips = 6;
+}
+
+/// Search result containing a list of matching food items.
+/// Returned by Search and Suggestions actions.
+message SearchResult {
+  /// List of food items matching the query or suggestion criteria.
+  repeated FoodItem items = 1;
+}
+
+/// A food item from search/suggestions — lighter than FoodResult.
+/// Contains summary macros but no ingredient breakdown.
+message FoodItem {
+  /// Provider-specific unique identifier for this food item.
+  string id = 1;
+  /// Display name (e.g. "Banana", "Coca-Cola Classic 330ml").
+  string name = 2;
+  /// Calories in kcal per default serving.
+  double calories = 3;
+  /// Protein in grams per default serving.
+  double protein = 4;
+  /// Carbohydrates in grams per default serving.
+  double carbs = 5;
+  /// Fats in grams per default serving.
+  double fats = 6;
+  /// Brand name if this is a branded/packaged product.
+  optional string brand = 7;
+  /// Available serving sizes with pre-calculated macros for each.
+  repeated ServingType serving_types = 8;
+}
+
+/// A specific serving size option for a food item.
+/// Each serving type has pre-calculated macros for convenience.
+message ServingType {
+  /// Provider-specific identifier for this serving type.
+  string id = 1;
+  /// Human-readable label (e.g. "1 cup", "100g", "1 medium").
+  string label = 2;
+  /// Numeric amount in the specified unit (e.g. 240.0 for 240ml).
+  double amount = 3;
+  /// Unit of measurement (e.g. "g", "ml", "piece").
+  string unit = 4;
+  /// Calories in kcal for this serving size.
+  double calories = 5;
+  /// Protein in grams for this serving size.
+  double protein = 6;
+  /// Carbohydrates in grams for this serving size.
+  double carbs = 7;
+  /// Fats in grams for this serving size.
+  double fats = 8;
+}
+
+// =====================================================================
+// Typed request envelopes — top-level scalar fields land as flat
+// `args["X"]` entries via `argsFromRequestFlatteningBase`, matching
+// what the Rust executors read via `cmd.string_for_field("X")`.
+// =====================================================================
+
+// Analyze food from text description OR image URL. At least one of
+// `text` / `image` must be set; if both are present, the executor
+// prefers `image` (provider plugins resolve preference).
+message AnalyzeRequest {
+  asyncify.types.BaseRequest base = 1;
+  // Food description text (e.g. "grilled chicken salad with feta").
+  optional string text = 2;
+  // Image URL — `file://`, `data:` URI, or `http(s)://`. The wasm
+  // module reads the file and base64-encodes internally.
+  optional string image = 3;
+}
+
+// Search for food items by free-text name/query.
+message SearchRequest {
+  asyncify.types.BaseRequest base = 1;
+  // Search query (e.g. "banana").
+  string query = 2;
+}
+
+// Provider-side healthiness analytics for a known food + macros.
+// Inputs are optional except `name` so callers can request a score
+// for either a fully-typed food or a name-only lookup (provider fills
+// the missing macros from its catalog).
+message HealthScoreRequest {
+  asyncify.types.BaseRequest base = 1;
+  // Display name of the food item (required).
+  string name = 2;
+  // Calories in kcal for the analyzed portion.
+  optional double calories = 3;
+  // Protein in grams.
+  optional double protein = 4;
+  // Carbohydrates in grams.
+  optional double carbs = 5;
+  // Fats in grams.
+  optional double fats = 6;
+}
+
+// Lookup a packaged food item by its UPC/EAN barcode.
+message BarcodeRequest {
+  asyncify.types.BaseRequest base = 1;
+  // The product barcode string (digits-only is typical).
+  string barcode = 2;
+}
+
+// Server-curated food suggestions (popular / trending / etc.). No
+// args today — the provider picks the surface.
+message SuggestionsRequest {
+  asyncify.types.BaseRequest base = 1;
+}
+
+// Lookup a single ingredient by free-text name.
+message IngredientRequest {
+  asyncify.types.BaseRequest base = 1;
+  // Ingredient name (e.g. "romaine lettuce").
+  string name = 2;
+}
+
+// Calories actions reachable via gRPC-style method names. Routes
+// land in the same `FnConsumer` as the legacy UUID action_id path —
+// every existing `ActionID.calories*` UUID stays valid.
+service CaloriesService {
+  rpc Analyze(AnalyzeRequest) returns (FoodResult);
+  rpc Search(SearchRequest) returns (SearchResult);
+  rpc HealthScore(HealthScoreRequest) returns (HealthScoreResult);
+  rpc Barcode(BarcodeRequest) returns (FoodResult);
+  rpc Suggestions(SuggestionsRequest) returns (SearchResult);
+  rpc Ingredient(IngredientRequest) returns (FoodResult);
+}
+

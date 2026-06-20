@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package asyncify.task;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/struct.proto";
+import "types.proto";
+
+option swift_prefix = "WaT";
+
+enum CallID {
+  CALL_ID_UNSPECIFIED = 0;
+  CALL_ID_GET_STATUS = 1;
+  CALL_ID_LIST_ACTIONS = 2;
+  CALL_ID_RUN_ACTION = 3;
+  CALL_ID_CANCEL_ACTION = 4;
+  CALL_ID_MANAGER_TICK = 5;
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_CREATED = 1;
+  STATUS_PROCESSING = 2;
+  STATUS_COMPLETED = 3;
+  STATUS_ERROR = 4;
+}
+
+message Options {
+  // action provider id
+  string provider = 1;
+}
+
+message ListActions {
+  repeated Action actions = 1;
+}
+
+message Action {
+  enum Subscription {
+    UNAVAILABLE = 0;
+    FREE = 1;
+    // included free
+    PREMIUM = 3;
+    ONE_TIME = 4;
+    // included FREE, PREMIUM
+    LIFE_TIME = 11;
+  }
+  string id = 1;
+  string name = 2;
+  string provider = 3;
+  asyncify.types.Image preview = 4;
+  map<string, asyncify.types.Argument> args = 5;
+  // to display to user
+  repeated string sorted_args = 6;
+  int32 subscriptions = 7;
+  bool cancellable = 8;
+  google.protobuf.Struct metadata = 9;
+  // gRPC-style method names this action serves (e.g.
+  // "asyncify.aiart.AiartService/Stamp"). Populated by the Rust
+  // REGISTRY at action-listing time from the by-method dispatch
+  // table; empty for legacy-only actions. Lets Swift look up an
+  // action's args / model_infos by method name without ever needing
+  // to know the underlying action_id (UUID).
+  repeated string methods = 10;
+}
+
+message Task {
+  string id = 1;
+  Status status = 2;
+  google.protobuf.Any value = 3;
+  string provider = 4;
+  google.protobuf.Struct metadata = 5;
+}
+
+message ListTasks {
+  repeated Task tasks = 1;
+}
+
+message TaskResult {
+  repeated google.protobuf.Any results = 1;
+  string last_error = 2;
+}

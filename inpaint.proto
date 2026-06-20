@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package asyncify.inpaint;
+
+import "google/protobuf/struct.proto";
+import "types.proto";
+import "codegen.proto";
+
+option swift_prefix = "Inpaint";
+
+message Options {
+}
+
+message ObjectSegments {
+  string session_id = 1;
+  repeated Segment segments = 2;
+  string suggest_mask = 3;
+  repeated string suggest_object_ids = 4;
+  google.protobuf.Struct metadata = 5;
+}
+
+message Segment {
+  // bounding box
+  asyncify.types.Rect bbox = 2;
+  asyncify.types.Image mask = 3;
+  google.protobuf.Struct metadata = 4;
+}
+
+message Erase {
+  string session_id = 1;
+  asyncify.types.Image image = 2;
+  asyncify.types.Image mask = 3;
+  google.protobuf.Struct metadata = 4;
+}
+
+// =====================================================================
+// Typed request envelopes — flat string fields land as `args["X"]`
+// for `cmd.string_for_field("X")` reads. No BaseRequest: inpaint
+// dispatch lets Rust's provider_strategy pick the provider; the
+// Swift host doesn't pin per-call.
+// =====================================================================
+
+message AutoSuggestionRequest {
+  // Source image URL — `file://`, `data:` URI, or `http(s)://`.
+  string image = 1;
+}
+
+message EnhanceRequest {
+  string image = 1;
+  // 2 / 4 / 8 — sent as a string to match the wire (Rust reads via
+  // `string_for_field`). Empty defaults to 2 on the Rust side.
+  string zoom_factor = 2 [json_name="zoom_factor"];
+}
+
+message RemoveBgRequest {
+  string image = 1;
+}
+
+// Either `image` (start a new erase session) or `session_id`
+// (continue a session from `AutoSuggestion`); never both. The mask
+// arrives as either `mask_brush` (drawn mask file URL) or
+// `mask_objects` (comma-joined ids from `AutoSuggestion.segments`).
+message EraseRequest {
+  optional string image = 1;
+  optional string session_id = 2 [json_name="session_id"];
+  optional string mask_brush = 3 [json_name="mask_brush"];
+  optional string mask_objects = 4 [json_name="mask_objects"];
+}
+
+message SkinBeautyRequest {
+  string image = 1;
+}
+
+message SkyRequest {
+  string image = 1;
+}
+
+message TryOnRequest {
+  // Person/model photo.
+  string image = 1;
+  // Garment image to dress the model in.
+  string cloth_image = 2 [json_name="cloth_image"];
+}
+
+message ClothesRequest {
+  string image = 1;
+}
+
+// Inpaint actions reachable via gRPC-style method names. Routes
+// land in the same `FnConsumer` as the legacy UUID action_id path.
+service InpaintService {
+  rpc AutoSuggestion(AutoSuggestionRequest) returns (ObjectSegments);
+  rpc Enhance(EnhanceRequest) returns (ObjectSegments);
+  rpc RemoveBg(RemoveBgRequest) returns (Segment);
+  rpc Erase(EraseRequest) returns (asyncify.inpaint.Erase);
+  rpc SkinBeauty(SkinBeautyRequest) returns (ObjectSegments);
+  rpc Sky(SkyRequest) returns (Segment);
+  rpc TryOn(TryOnRequest) returns (asyncify.types.Image);
+  rpc Clothes(ClothesRequest) returns (Segment);
+}
+

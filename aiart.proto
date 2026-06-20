@@ -1,0 +1,189 @@
+syntax = "proto3";
+
+package asyncify.aiart;
+
+import "google/protobuf/struct.proto";
+import "types.proto";
+import "codegen.proto";
+
+option swift_prefix = "Aiart";
+
+enum Style {
+  STYLE_UNSPECIFIED = 0;
+  ANIME = 1;
+  CYBERPUNK = 2;
+  WATERCOLOR = 3;
+  PIXEL_ART = 4;
+  THREE_D_CARTOON = 5;
+  FANTASY = 6;
+  OIL_PAINTING = 7;
+  LINE_ART = 8;
+  MINIMAL = 9;
+  PHOTOREAL = 10;
+  POSTAGE = 11;
+  VINTAGE_POSTAGE = 12;
+  WAX_SEAL = 13;
+  RUBBER_STAMP = 14;
+  ENGRAVED = 15;
+  BOTANICAL_POSTAGE = 16;
+}
+
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  NORMAL = 1;
+  STAMPS = 2;
+  AVATAR = 3;
+  VIDEO = 4;
+}
+
+message GenerateResult {
+  repeated asyncify.types.Image images = 1;
+  optional string prompt = 2;
+  optional Style style = 3;
+  optional string provider_task_id = 4;
+  google.protobuf.Struct metadata = 5;
+  optional string aspect_ratio = 6;
+  optional uint32 width = 7;
+  optional uint32 height = 8;
+  optional Mode mode = 9;
+}
+
+// Result of a video generation pipeline (Character.AI Avatar FX).
+// RunAction returns this with video_id + task status=Processing.
+// GetStatus returns updated progress/status until COMPLETED or ERRORED.
+message VideoGenerateResult {
+  // Request-level video ID used for polling status
+  string video_id = 1;
+  // Final video URL (R2 signed, 7d expiry) — set when status=COMPLETED
+  optional string video_url = 2;
+  // Pipeline status: QUEUED, PROCESSING, COMPLETED, ERRORED
+  optional string status = 3;
+  // Generation progress 0.0–1.0 (updated during PROCESSING)
+  optional double progress = 4;
+  // Auto-generated prompt from image description step
+  optional string prompt = 5;
+  // Style-transferred image URL produced during pipeline
+  optional string styled_image_url = 6;
+  // TTS audio URL produced during pipeline
+  optional string audio_url = 7;
+  // Art style applied (e.g. "Ghibli")
+  optional string art_style = 8;
+  google.protobuf.Struct metadata = 9;
+}
+
+// =====================================================================
+// Typed request envelopes — top-level scalar fields land as flat
+// `args["X"]` entries via `argsFromRequest`, matching what the
+// existing Rust executors read via `cmd.string_for_field("X")`.
+// Backward compatible: the legacy `[String:String]` dict path still
+// works, every field here is a real wasm-action arg.
+// =====================================================================
+
+// Stamps mode (frame artwork with placeholder cutout). Plugins read
+// `prompt` for the figure description and may use plugin-specific
+// extras (stamp shape / placeholder size) the form drives.
+message StampRequest {
+  asyncify.types.BaseRequest base = 1;
+  // Subject of the generation, e.g. "a fox in a cyberpunk city".
+  optional string prompt = 2;
+  // Visual style preset.
+  optional Style style = 3;
+  // Reference image URL — http(s)/data URI/file URL the provider
+  // downloads. Mutually exclusive with `image_path`.
+  optional string image_url = 4 [json_name="image_url"];
+  // Local file path (file://) when the host already has the bytes
+  // staged. Mutually exclusive with `image_url`.
+  optional string image_path = 5 [json_name="image_path"];
+  // Provider model id (e.g. "fal-ai/flux-pro"). Plugin's default
+  // applies when empty.
+  optional string model = 6;
+  // Per-model aspect-ratio string (e.g. "1:1", "16:9"). Plugin
+  // default applies when empty. Discovered values per model live
+  // in `ListModelsResponse.models[].metadata["aspect_ratios"]`.
+  optional string aspect_ratio = 7 [json_name="aspect_ratio"];
+  // Number-of-images hint as a string (matches the existing dict path).
+  optional string num_images = 8 [json_name="num_images"];
+}
+
+// Normal mode (full image generation). Same fields as Stamp; the
+// plugin's mode selection drives the system-prompt + endpoint.
+message NormalRequest {
+  asyncify.types.BaseRequest base = 1;
+  optional string prompt = 2;
+  optional Style style = 3;
+  optional string image_url = 4 [json_name="image_url"];
+  optional string image_path = 5 [json_name="image_path"];
+  optional string model = 6;
+  optional string aspect_ratio = 7 [json_name="aspect_ratio"];
+  optional string num_images = 8 [json_name="num_images"];
+}
+
+// Avatar mode (head-and-shoulders portrait). Same field set as
+// Normal; only the system prompt differs in the executor.
+message AvatarRequest {
+  asyncify.types.BaseRequest base = 1;
+  optional string prompt = 2;
+  optional Style style = 3;
+  optional string image_url = 4 [json_name="image_url"];
+  optional string image_path = 5 [json_name="image_path"];
+  optional string model = 6;
+  optional string aspect_ratio = 7 [json_name="aspect_ratio"];
+  optional string num_images = 8 [json_name="num_images"];
+}
+
+// Per-mode model discovery — replaces the metadata-driven
+// `model_infos`/`default_model` lookup off the Action descriptor.
+// Returns the active provider's model list for `mode` plus the
+// suggested default id. Each `ModelInfo.metadata["aspect_ratios"]`
+// carries the per-model aspect-ratio list so the UI can render the
+// ratio picker filtered by the selected model.
+message ListModelsRequest {
+  asyncify.types.BaseRequest base = 1;
+  // Which mode's model list to return.
+  optional Mode mode = 2;
+}
+
+message ListModelsResponse {
+  repeated asyncify.types.ModelInfo models = 1;
+  optional string default_model_id = 2 [json_name="default_model_id"];
+}
+
+// Video generation (Character.AI Avatar FX pipeline). The host calls
+// `create()` for this rpc and polls via `getStatus` — `Video` is
+// `skip_flow_kit` so the plugin doesn't emit a typed wrapper.
+message VideoRequest {
+  asyncify.types.BaseRequest base = 1;
+  // Local file path (file://) of the source image — the pipeline
+  // describes it, style-transfers it, and animates the result.
+  optional string image_path = 2 [json_name="image_path"];
+  // Display name of the art style preset (e.g. "Ghibli").
+  optional string art_style = 3 [json_name="art_style"];
+  // Optional caller-supplied audio path; empty = the pipeline runs
+  // its own TTS step to generate audio from the auto-prompt.
+  optional string audio_path = 4 [json_name="audio_path"];
+}
+
+// Aiart actions reachable via gRPC-style method names. Routes land in
+// the same `FnConsumer` as the legacy UUID action_id path —
+// `stamp::ACTION_ID` / `stamp::NORMAL_ACTION_ID` /
+// `stamp::AVATAR_ACTION_ID` / `video::ACTION_ID` stay valid.
+service AiartService {
+  rpc Stamp(StampRequest) returns (GenerateResult);
+  rpc Normal(NormalRequest) returns (GenerateResult);
+  rpc Avatar(AvatarRequest) returns (GenerateResult);
+
+  // Video runs a multi-stage pipeline (upload → transform → describe
+  // → tts → generation) that can take ~30 minutes. The plugin emits
+  // both `video(...)` (auto-poll, typed `VideoGenerateResult`) and
+  // `videoTask(...)` (raw `WaTTask` for manual polling) — long
+  // pipelines should use `videoTask` so the UI can show progress
+  // via the pending-tasks loop instead of blocking on auto-poll.
+  rpc Video(VideoRequest) returns (VideoGenerateResult);
+
+  // Per-mode model discovery. Replaces the metadata-driven
+  // `model_infos`/`default_model` lookup so the View doesn't need
+  // to fetch the Action descriptor; aspect-ratio choices live in
+  // each `ModelInfo.metadata["aspect_ratios"]`.
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+}
+

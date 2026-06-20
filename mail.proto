@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package asyncify.mail;
+
+option swift_prefix = "Mail";
+
+// Inbox credentials returned by Register. The client is expected to
+// persist `address` + `password` locally — disposable-mail providers
+// typically do not offer account recovery, so losing them means
+// losing the inbox. `token` is the bearer credential consumed by
+// subsequent message calls.
+message Account {
+  // Stable account identifier assigned by the provider. Opaque
+  // string; not used by the message endpoints (those key off the
+  // token) but surfaced for observability / UI.
+  string id = 1;
+  // Full email address of the inbox (e.g. "abc123@example.com").
+  // This is the value the user shares with third parties to
+  // receive mail.
+  string address = 2;
+  // Plaintext password chosen (or auto-generated) at registration.
+  // Kept so the caller can re-mint a token later if the current
+  // one expires.
+  string password = 3;
+  // Bearer token used as `Authorization: Bearer {token}` for the
+  // ListMessages / ReadMessage calls. Lifetime is provider-managed;
+  // callers should be ready to re-register on a 401.
+  string token = 4;
+  // Inbox byte quota assigned by the provider. Zero when the
+  // provider does not expose a quota.
+  int64 quota = 5;
+  // Bytes currently occupied by messages in this inbox. Zero when
+  // the provider does not report usage.
+  int64 used = 6;
+}
+
+// One participant on a mail envelope (from / to / cc / bcc). `name`
+// is the optional display name and may be empty when the sender
+// didn't set one.
+message Address {
+  string address = 1;
+  string name = 2;
+}
+
+// Lightweight envelope returned by ListMessages. The body is not
+// included — only `intro`, a provider-truncated preview (usually
+// the first ~100–150 characters). Fetch the full message via
+// ReadMessage when the user opens it.
+message MessageSummary {
+  // Opaque message id — use as the identifier when calling
+  // ReadMessage.
+  string id = 1;
+  // Envelope sender.
+  Address from = 2;
+  // Envelope recipients. May be empty on malformed messages.
+  repeated Address to = 3;
+  // Subject line as received.
+  string subject = 4;
+  // Short preview of the body (provider-truncated).
+  string intro = 5;
+  // Read-receipt flag maintained server-side. Flips to true once
+  // the message is fetched via ReadMessage.
+  bool seen = 6;
+  // Whether the message carries MIME attachments. The list
+  // endpoint reports this boolean but not the attachment contents
+  // — use ReadMessage to enumerate them.
+  bool has_attachments = 7;
+  // Body size in bytes as reported by the provider.
+  int64 size = 8;
+  // Creation timestamp in ISO-8601 UTC (e.g.
+  // "2026-04-16T12:34:56+00:00"). Opaque to Rust; parsed in Swift.
+  string created_at = 9;
+  // Last-update timestamp (same format as created_at).
+  string updated_at = 10;
+}
+
+// Full message returned by ReadMessage. Superset of MessageSummary
+// plus the rendered body (text + html parts) and attachment
+// descriptors.
+message Message {
+  string id = 1;
+  Address from = 2;
+  repeated Address to = 3;
+  repeated Address cc = 4;
+  repeated Address bcc = 5;
+  string subject = 6;
+  string intro = 7;
+  // Plain-text rendering of the body. Empty when the message is
+  // HTML-only — fall back to `html` in that case.
+  string text = 8;
+  // HTML body parts. Returned as a repeated field because some
+  // providers split multipart/alternative into an array of strings
+  // (one per MIME part); clients should concatenate them in order
+  // before rendering. Providers that return a single HTML string
+  // populate exactly one element.
+  repeated string html = 9;
+  bool seen = 10;
+  bool flagged = 11;
+  bool has_attachments = 12;
+  repeated Attachment attachments = 13;
+  int64 size = 14;
+  // See MessageSummary.created_at for format.
+  string created_at = 15;
+  string updated_at = 16;
+}
+
+// MIME attachment descriptor. The Rust plugin is responsible for
+// normalizing `download_url` into a fully-qualified absolute URL,
+// so clients can fetch the bytes with `token` as
+// `Authorization: Bearer {token}` without knowing the provider's
+// base host.
+message Attachment {
+  string id = 1;
+  string filename = 2;
+  string content_type = 3;
+  string disposition = 4;
+  string transfer_encoding = 5;
+  // Whether this part is a related/inline asset (e.g. an image
+  // referenced from the HTML body) rather than a standalone
+  // attachment.
+  bool related = 6;
+  int64 size = 7;
+  // Absolute URL, ready to GET with the inbox bearer token.
+  string download_url = 8;
+}
+
+// Returned by the Register action (wrapped in task.Task.value).
+message RegisterResult {
+  Account account = 1;
+}
+
+// Returned by the ListMessages action.
+message MessageList {
+  // Total messages the server has for this inbox across all pages.
+  // Zero on an empty inbox or when the provider does not expose
+  // the count.
+  int32 total = 1;
+  repeated MessageSummary messages = 2;
+}
+
+// Returned by the ReadMessage action.
+message MessageResult {
+  Message message = 1;
+}
+

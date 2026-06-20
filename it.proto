@@ -1,0 +1,14 @@
+syntax = "proto3";
+package asyncify.it;
+
+// import "google/protobuf/struct.proto";
+
+enum CallID {
+  CALL_ID_UNSPECIFIED = 0;
+  CALL_ID_TEST_DELEGATE_HTTP = 1;
+  CALL_ID_TEST_DELEGATE_REGEX = 2;
+  CALL_ID_TEST_DELEGATE_JS = 3;
+  CALL_ID_TEST_DELEGATE_WS = 4;
+  CALL_ID_TEST_NOOP = 5;
+  CALL_ID_TEST_ECHO = 6;
+}

@@ -1,0 +1,341 @@
+syntax = "proto3";
+
+package asyncify.homedecor;
+
+import "types.proto";
+import "codegen.proto";
+
+option swift_prefix = "Homedecor";
+
+enum ProcessType {
+  PROCESS_TYPE_UNSPECIFIED = 0;
+  // Full radical interior redesign (replace all furniture + decor)
+  INTERIOR = 1;
+  // Facade material swap only (keep building geometry)
+  EXTERIOR = 2;
+  // Landscape/vegetation redesign (keep hardscape)
+  GARDEN = 3;
+  // Paint room walls/surfaces with color (HomeAI: needs mask + color)
+  PAINT = 4;
+  // Replace masked objects with prompt-described items (needs mask)
+  REPLACE = 5;
+  // Floor material replacement only
+  FLOOR = 6;
+  // Redesign using a second reference image as style guide (needs ref_image)
+  REFERENCE = 7;
+  // Add furniture + decor to empty/sparse room (keep architecture)
+  STAGING = 8;
+  // Remove clutter, clean surfaces (fixed prompt, no style)
+  DECLUTTER = 9;
+  // Generate 2D floor plan from photo (fixed prompt, no style)
+  FLOOR_PLAN = 10;
+  // Render floor plan as photorealistic interior in chosen style
+  PLAN_TO_IMAGE = 11;
+}
+
+enum StyleSelection {
+  STYLE_SELECTION_UNSPECIFIED = 0;
+  // Keep room structure, change style only (HomeAI/DecAI)
+  STRUCTURAL_PRESERVATION = 1;
+  // Full renovation including structural changes
+  RENOVATION_DESIGN = 2;
+}
+
+enum RoomType {
+  ROOM_TYPE_UNSPECIFIED = 0;
+  // Interior rooms
+  LIVING_ROOM = 1;
+  BEDROOM = 2;
+  KITCHEN = 3;
+  DINING_ROOM = 4;
+  BATHROOM = 5;
+  OFFICE = 6;
+  HOME_OFFICE = 7;
+  STUDY_ROOM = 8;
+  ATTIC = 9;
+  COFFEE_SHOP = 10;
+  GAMING_ROOM = 11;
+  RESTAURANT = 12;
+  TOILET = 13;
+  BALCONY = 14;
+  HALL = 15;
+  GARDEN_ROOM = 16;
+  DECK = 17;
+  ENTRYWAY = 25;
+  LAUNDRY_ROOM = 26;
+  // Exterior / building types
+  APARTMENT = 18;
+  RESIDENTIAL = 19;
+  HOUSE = 20;
+  RETAIL = 21;
+  VILLA = 22;
+  UNDER_STAIR_SPACE = 23;
+  OFFICE_BUILDING = 24;
+  TOWER = 27;
+  RANCH = 28;
+  SWIMMING_POOL = 29;
+  YARD = 30;
+  OTHER_ROOM = 31;
+}
+
+// Provider key: R=ReRoom, H=HomeAI, D=DecAI
+// Interior mapping shown; ext: prefix = exterior/garden only
+// Preview: HomeAI CDN thumbnails (R and D have no discoverable preview API)
+enum RoomStyle {
+  ROOM_STYLE_UNSPECIFIED = 0;
+  // R:"modern"  H:"1",ext:"modernStyle"  D:"10",ext:"24"
+  // https://cdn.homeinterior.ai/assets/thumbnail_modernlivingroom_3a2f0f51ad/thumbnail_modernlivingroom_3a2f0f51ad.png
+  MODERN = 1;
+  // R:"tropical"  H:"2"  D:"97",ext:"123"
+  // https://cdn.homeinterior.ai/assets/thumbnail_tropicalbathroom_e020eb66cd/thumbnail_tropicalbathroom_e020eb66cd.png
+  TROPICAL = 2;
+  // R:"minimalism"  H:"5",ext:"minimalisticStyle"  D:"11",ext:"26"
+  // https://cdn.homeinterior.ai/assets/thumbnail_minimalisticdiningroom_482a4618a8/thumbnail_minimalisticdiningroom_482a4618a8.png
+  MINIMALIST = 3;
+  // R:"freespirit"  H:"9"  D:"5"
+  // https://cdn.homeinterior.ai/assets/thumbnail_bohemainhomeoofice_235aa67d2f/thumbnail_bohemainhomeoofice_235aa67d2f.png
+  BOHEMIAN = 4;
+  // R:"nomad"  H:"10"  D:"95",ext:"126"
+  // https://cdn.homeinterior.ai/assets/thumbnail_rustickitchen_45b8feb798/thumbnail_rustickitchen_45b8feb798.png
+  RUSTIC = 5;
+  // R:"retro"  H:"11"  D:"12"
+  // https://cdn.homeinterior.ai/assets/thumbnail_vintageoffice_6a2a7172dc/thumbnail_vintageoffice_6a2a7172dc.png
+  VINTAGE = 6;
+  // R:"grandeur"  H:"12"  D:"79"
+  // https://cdn.homeinterior.ai/assets/thumbnail_baroquelivingroom_5f6510a09e/thumbnail_baroquelivingroom_5f6510a09e.png
+  BAROQUE = 7;
+  // R:"mediterranean"  H:"13",ext:"mediterraneanStyle"  D:"121",ext:"28"
+  // https://cdn.homeinterior.ai/assets/thumbnail_Mediterraneanlivingroom_979a7ad1e3/thumbnail_Mediterraneanlivingroom_979a7ad1e3.png
+  MEDITERRANEAN = 8;
+  // R:"neon"  H:"14"  D:"111"
+  // https://cdn.homeinterior.ai/assets/thumbnail_cyberpunkgamingroom_5b28551433/thumbnail_cyberpunkgamingroom_5b28551433.png
+  CYBERPUNK = 9;
+  // R:"nature"  H:"16"  D:"93"
+  // https://cdn.homeinterior.ai/assets/thumbnail_biophilicrestaurant_02a79e64c9/thumbnail_biophilicrestaurant_02a79e64c9.png
+  BIOPHILIC = 10;
+  // H:"17"
+  // https://cdn.homeinterior.ai/assets/thumbnail_ancientegyptiandiningroom_ad04ea83dd/thumbnail_ancientegyptiandiningroom_ad04ea83dd.png
+  ANCIENT_EGYPTIAN = 11;
+  // H:"19"  D:"91"
+  // https://cdn.homeinterior.ai/assets/thumbnail_airbnbstudyroom_a9a9fa8fbc/thumbnail_airbnbstudyroom_a9a9fa8fbc.png
+  AIRBNB = 12;
+  // H:"21"
+  // https://cdn.homeinterior.ai/assets/thumbnail_Discothequebathroom_657c188f6c/thumbnail_Discothequebathroom_657c188f6c.png
+  DISCOTHEQUE = 13;
+  // H:"22"
+  // https://cdn.homeinterior.ai/assets/thumbnail_sohostylelivingroom_b485e61b9d/thumbnail_sohostylelivingroom_b485e61b9d.png
+  SOHO = 14;
+  // H:"23"  D:"119"
+  // https://cdn.homeinterior.ai/assets/thumbnail_rainbowkitchen_a908591def/thumbnail_rainbowkitchen_a908591def.png
+  RAINBOW = 15;
+  // R:"luxe"  H:"26"  D:"81",ext:"125"
+  // https://cdn.homeinterior.ai/assets/thumbnail_luxurybedroom_570b7ca576/thumbnail_luxurybedroom_570b7ca576.png
+  LUXURY = 16;
+  // H:"27"  D:"105"
+  // https://cdn.homeinterior.ai/assets/thumbnail_Techno_Wonderlandbedroom_530cdbb7a4/thumbnail_Techno_Wonderlandbedroom_530cdbb7a4.png
+  TECHNO = 17;
+  // H:"28"
+  // https://cdn.homeinterior.ai/assets/thumbnail_gameingroomgamer_b01ccffe5c/thumbnail_gameingroomgamer_b01ccffe5c.png
+  GAMER = 18;
+  // R:"oasis"  H:"29"  D:"89",ext:"128"
+  // https://cdn.homeinterior.ai/assets/thumbnail_cozylivingroom_cb12f0041e/thumbnail_cozylivingroom_cb12f0041e.png
+  COZY = 19;
+  // R:"coastal"  H:"31"  D:"99"
+  // https://cdn.homeinterior.ai/assets/thumbnail_Coastaldiningroom_b2d146bc62/thumbnail_Coastaldiningroom_b2d146bc62.png
+  COASTAL = 20;
+  // R:"japanese"  H:"33"  D:"1"
+  // https://cdn.homeinterior.ai/assets/thumbnail_japandibedroom_0a18b44b92/thumbnail_japandibedroom_0a18b44b92.png
+  JAPANDI = 21;
+  // R:"english"  H:"35"
+  // https://cdn.homeinterior.ai/assets/thumbnail_cottagecorelivingroom_239d3f8b79/thumbnail_cottagecorelivingroom_239d3f8b79.png
+  COTTAGECORE = 22;
+  // R:"oasis"  H:"36",ext:"skiChaletStyle"
+  // https://cdn.homeinterior.ai/assets/thumbnail_skichaletattic_15a7bc225a/thumbnail_skichaletattic_15a7bc225a.png
+  SKI_CHALET = 23;
+  // R:"heritage"  H:"37",ext:"gothicStyle"  D:"87"
+  // https://cdn.homeinterior.ai/assets/thumbnail_gothicstudyroom_9cdfc7adab/thumbnail_gothicstudyroom_9cdfc7adab.png
+  GOTHIC = 24;
+  // H:"38"  D:"103"
+  // https://cdn.homeinterior.ai/assets/thumbnail_creepyofficemin_5e7be1a322/thumbnail_creepyofficemin_5e7be1a322.png
+  CREEPY = 25;
+  // H:"39"  D:"113"
+  // https://cdn.homeinterior.ai/assets/thumbnail_medivaldiningroom_a223be5f04/thumbnail_medivaldiningroom_a223be5f04.png
+  MEDIEVAL = 26;
+  // H:"41"
+  // https://cdn.homeinterior.ai/assets/thumbnail_80skitchen_1c19bb1e43/thumbnail_80skitchen_1c19bb1e43.png
+  EIGHTIES = 27;
+  // H:"42"  D:"109"
+  // https://cdn.homeinterior.ai/assets/thumbnail_cartooncoffeshop_e7642d8650/thumbnail_cartooncoffeshop_e7642d8650.png
+  CARTOON = 28;
+  // H:"43"
+  // https://cdn.homeinterior.ai/assets/thumbnail_woodkitchen_5d588f2af9/thumbnail_woodkitchen_5d588f2af9.png
+  WOOD = 29;
+  // H:"44"
+  // https://cdn.homeinterior.ai/assets/thumbnail_chocolatelivingroom_215239d630/thumbnail_chocolatelivingroom_215239d630.png
+  CHOCOLATE = 30;
+  // H:ext:"italianateStyle"
+  // https://cdn.homeinterior.ai/assets/thumbnail_italianate_0b89b166fb/thumbnail_italianate_0b89b166fb.png
+  ITALIANATE = 31;
+  // H:ext:"brutalistStyle"
+  // https://cdn.homeinterior.ai/assets/thumbnail_brutalist_828a09c9c9/thumbnail_brutalist_828a09c9c9.png
+  BRUTALIST = 32;
+  // R:"victorian"  H:ext:"artDecoStyle"
+  // https://cdn.homeinterior.ai/assets/thumbnail_art_deco_b3e8c7b48e/thumbnail_art_deco_b3e8c7b48e.png
+  ART_DECO = 33;
+  // H:ext:"chineseStyle"
+  // https://cdn.homeinterior.ai/assets/thumbnail_chinese_565b1f487e/thumbnail_chinese_565b1f487e.png
+  CHINESE = 34;
+  // R:"japanese"  H:ext:"japaneseStyle"  D:"4"
+  // https://cdn.homeinterior.ai/assets/thumbnail_japanese_9242ac2d7d/thumbnail_japanese_9242ac2d7d.png
+  JAPANESE = 35;
+  // R:"english"  H:ext:"cottageStyle"
+  // https://cdn.homeinterior.ai/assets/thumbnail_cottage_f524e469d1/thumbnail_cottage_f524e469d1.png
+  COTTAGE = 36;
+  // H:ext:"spanishStyle"
+  // https://cdn.homeinterior.ai/assets/thumbnail_spanish_84174a2842/thumbnail_spanish_84174a2842.png
+  SPANISH = 37;
+  // H:ext:"moroccoStyle"
+  // https://cdn.homeinterior.ai/assets/thumbnail_morocco_22cbc1cc6d/thumbnail_morocco_22cbc1cc6d.png
+  MOROCCO = 38;
+  // R:"midcenturymodern"  H:ext:"midcenturyStyle"  D:"13",ext:"29"
+  // https://cdn.homeinterior.ai/assets/thumbnail_midcentury_696458084b/thumbnail_midcentury_696458084b.png
+  MIDCENTURY = 39;
+  // H:ext:"middleEasternStyle"
+  // https://cdn.homeinterior.ai/assets/thumbnail_middle_eastern_a778b48b80/thumbnail_middle_eastern_a778b48b80.png
+  MIDDLE_EASTERN = 40;
+  // R:"nomad"  H:ext:"farmHouseStyle"  D:"6",ext:"27"
+  // https://cdn.homeinterior.ai/assets/thumbnail_farmhouse_8f4e2759e1/thumbnail_farmhouse_8f4e2759e1.png
+  FARMHOUSE = 41;
+  // R:"english"  H:ext:"frenchStyle"
+  // https://cdn.homeinterior.ai/assets/thumbnail_french_587a92aa1f/thumbnail_french_587a92aa1f.png
+  FRENCH = 42;
+  // H:ext:"christmasStyle"  D:"45",ext:"47"
+  // https://cdn.homeinterior.ai/assets/thumbnail_image_15_675eb12b04/thumbnail_image_15_675eb12b04.png
+  CHRISTMAS = 43;
+  // R:"industrial"  D:"2"
+  INDUSTRIAL = 44;
+  // R:"scandinavian"  D:"7"
+  SCANDINAVIAN = 45;
+  // D:"20",ext:"25"
+  NO_STYLE = 46;
+  // R:"nature"  D:"22",ext:"35"
+  ZEN = 47;
+  // D:"115"
+  HALLOWEEN = 48;
+  // D:"117"
+  CONCRETE = 49;
+  // R:"retro"  D:ext:"130"
+  RETRO = 50;
+  // R:"beachhouse"
+  BEACH_HOUSE = 51;
+  // R:"isle"
+  ISLE = 52;
+  // R:"stValentinesDay"
+  ST_VALENTINES_DAY = 53;
+}
+
+enum ColorPalette {
+  COLOR_PALETTE_UNSPECIFIED = 0;
+  MILLENNIAL_GRAY = 1;
+  TERRACOTTA_MIRAGE = 2;
+  NEON_SUNSET = 3;
+  FOREST_HUES = 4;
+  PEACH_ORCHARD = 5;
+  FUSCHIA_BLOSSOM = 6;
+  EMERALD_GEM = 7;
+  PASTEL_BREEZE = 8;
+  AZURE_MIRAGE = 9;
+  TWILIGHT_BLUES = 10;
+  EARTHY_HARMONY = 11;
+  ARCTIC_LAVENDER = 12;
+  ANTIQUE_SAGE = 13;
+  EARTHY_HUES = 14;
+  VELVET_DUSK = 15;
+  OCEAN_MIST = 16;
+  AMETHYST_DREAM = 17;
+  SAKURA_BLOOM = 18;
+  LILAC_LOVE = 19;
+  WHIMSICAL_WISH = 20;
+  TURQUOISE_LAGOON = 21;
+}
+
+enum SurfaceType {
+  SURFACE_TYPE_UNSPECIFIED = 0;
+  WALL = 1;
+  CEILING = 2;
+  FLOOR_SURFACE = 3;
+  DOOR = 4;
+  CABINET = 5;
+}
+
+// All possible fields for generate actions. Providers consume a
+// subset based on each process type's supported_fields.
+//
+// Enum-shaped fields (room_style, room_type, color, surface_type,
+// style_selection) are proto-typed — the proto schema is the single
+// source of truth for the enum universe; each plugin advertises a
+// subset via the `supported_*(pt)` trait methods. SwiftProtobuf
+// JSON-encodes these as the value name in SCREAMING_SNAKE_CASE
+// (e.g. "MODERN", "LIVING_ROOM", "MILLENNIAL_GRAY"); the Rust
+// executor reads that name from the args bag and resolves it through
+// `enum_names`. Callers pass the typed enum case directly on the
+// Swift API surface — no PascalCase round-trip.
+message GenerateRequest {
+  asyncify.types.BaseRequest base = 1;
+  // Source image — `file://` URL of a local capture, or `http(s)://`.
+  string file = 2;
+  // Target interior style for the redesign.
+  RoomStyle room_style = 3;
+  // Target room/space type the redesign targets.
+  RoomType room_type = 4;
+  // Free-text prompt / extra direction for the provider.
+  string prompt = 5;
+  // Color palette — only relevant for the Paint process type.
+  ColorPalette color = 6;
+  // Mask file URL — only for Paint / Replace.
+  string mask = 7;
+  // Surface to repaint — only for Paint.
+  SurfaceType surface_type = 8;
+  // Reference image URL — only for the Reference process type.
+  string ref_image = 9 [json_name="ref_image"];
+  // Provider-specific structural/renovation toggle for Interior.
+  StyleSelection style_selection = 10;
+}
+
+// Wrapped in task.Task.value as Any
+message GenerateResult {
+  asyncify.types.Image result = 1;
+  asyncify.types.Image input = 2;
+  RoomStyle room_style = 3;
+  RoomType room_type = 4;
+  ProcessType process_type = 5;
+}
+
+// Homedecor actions reachable via gRPC-style method names. Each rpc
+// maps 1:1 to a `generate::Builder` registered for that process
+// type — same `FnConsumer` as the legacy UUID action_id path.
+service HomedecorService {
+  // Full radical interior redesign.
+  rpc Interior(GenerateRequest) returns (GenerateResult);
+  // Facade material swap.
+  rpc Exterior(GenerateRequest) returns (GenerateResult);
+  // Landscape/vegetation redesign.
+  rpc Garden(GenerateRequest) returns (GenerateResult);
+  // Paint walls/surfaces (mask + color required).
+  rpc Paint(GenerateRequest) returns (GenerateResult);
+  // Replace masked objects with prompt-described items.
+  rpc Replace(GenerateRequest) returns (GenerateResult);
+  // Floor material swap.
+  rpc Floor(GenerateRequest) returns (GenerateResult);
+  // Restyle using a reference image (ref_image required).
+  rpc Reference(GenerateRequest) returns (GenerateResult);
+  // Add furniture + decor to empty rooms.
+  rpc Staging(GenerateRequest) returns (GenerateResult);
+  // Remove clutter + clean.
+  rpc Declutter(GenerateRequest) returns (GenerateResult);
+  // 2D floor plan from a photo.
+  rpc FloorPlan(GenerateRequest) returns (GenerateResult);
+  // Render a 2D floor plan as a photorealistic interior.
+  rpc PlanToImage(GenerateRequest) returns (GenerateResult);
+}
+

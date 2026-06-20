@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package asyncify.blobstore;
+
+import "codegen.proto";
+import "types.proto";
+import "visual.proto";
+
+option swift_prefix = "Blobstore";
+
+// BaseRequest moved to types.proto for cross-service reuse — see
+// `asyncify.types.BaseRequest`.
+
+// Upload a single file/blob through the resolved blobstore provider.
+// `file` is either a `file://` URL pointing at local bytes, a data
+// URI, or an HTTP(S) URL the executor downloads first. `filename` is
+// the destination object name; provider plugins use it to derive the
+// upload-endpoint path (Firebase Storage signs it into the URL).
+message UploadRequest {
+  // Source URL — `file://` path, `data:` URI, or `http(s)://` URL.
+  string file = 1;
+  // Destination filename; the host can default to a UUID + `.jpg`
+  // when omitted at the call site.
+  string filename = 2;
+  asyncify.types.BaseRequest base = 3;
+}
+
+message UploadResult {
+  string url = 1;
+  optional string provider = 2;
+}
+
+// List media from blobstore providers (e.g. Pexels editorial /
+// Unsplash listing). Empty query → editorial/trending feed.
+message ListMediaRequest {
+  // Free-text query; empty = editorial/trending listing.
+  string query = 1;
+  int32 page = 2;
+  int32 per_page = 3 [json_name="per_page"];
+}
+
+// Blobstore actions reachable via gRPC-style method names. Routes
+// land in the same upload executor as the legacy UUID action_id
+// (`c3f5a7b9-2d4e-6f8a-0c2e-4g6i8k0m2o4q`) — both paths share the
+// same `FnConsumer`.
+service BlobstoreService {
+  rpc Upload(UploadRequest) returns (UploadResult);
+  // Media listing — returns `asyncify.visual.PhotoSearchResult`
+  // from the resolved provider's editorial / query endpoint.
+  rpc ListMedia(ListMediaRequest) returns (asyncify.visual.PhotoSearchResult);
+}

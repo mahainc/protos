@@ -1,0 +1,213 @@
+syntax = "proto3";
+
+package asyncify.vision;
+
+import "google/protobuf/struct.proto";
+import "codegen.proto";
+
+option swift_prefix = "Vision";
+
+message ScanRequest {
+  // image file URI (file://) or URL (https://)
+  string file = 1;
+  // scan category (default: "object")
+  optional string category = 2;
+  // localization language (default: "en")
+  optional string language = 3;
+  // custom analysis prompt
+  optional string prompt = 4;
+}
+
+message ScanResult {
+  // AI-generated description/analysis
+  string description = 1;
+  // follow-up questions
+  repeated string suggested_questions = 2;
+  // identified object title
+  optional string title = 3;
+  // detected category
+  optional string category_type = 4;
+  // uploaded image URL
+  optional string image_url = 5;
+  // key-value characteristics
+  Characteristics characteristics = 6;
+  // food scans
+  NutritionInfo nutrition = 7;
+  // coin/stone scans
+  PhysicalFeatures physical = 8;
+  // market value
+  PriceInfo price = 9;
+  // related products/links
+  repeated ShoppingProduct discover_more = 10;
+  // purchase links
+  repeated Link buy_now = 11;
+  // reference sources
+  repeated Link sources = 12;
+  // AI insights
+  AICommentary ai_commentary = 13;
+  // category-specific info block
+  CategoryInfo category_info = 14;
+  // raw JSON response
+  optional string raw = 15;
+}
+
+message Characteristics {
+  // key-value pairs
+  map<string, string> fields = 1;
+}
+
+message NutritionInfo {
+  optional string kcal = 1;
+  optional string calories = 2;
+  optional string protein = 3;
+  optional string carbs = 4;
+  optional string fat = 5;
+  optional string shelf_life = 6 [json_name="shelf_life"];
+  optional string freshness = 7;
+}
+
+message PhysicalFeatures {
+  optional string weight = 1;
+  optional string diameter = 2;
+  optional string thickness = 3;
+  optional string edge = 4;
+  optional string composition = 5;
+  optional string mintage = 6;
+  optional string years_of_minting = 7 [json_name="years_of_minting"];
+  optional string grade = 8;
+  optional string krause_number = 9 [json_name="krause_number"];
+  optional string issuer = 10;
+  optional string rarity = 11;
+  optional string hardness_scale = 12 [json_name="hardness_scale"];
+  optional string density = 13;
+  optional string crystal_system = 14 [json_name="crystal_system"];
+  optional string luster = 15;
+  optional string formula = 16;
+  optional string color = 17;
+}
+
+message PriceInfo {
+  optional string average_fair_market_price = 1 [json_name="average_fair_market_price"];
+  optional string web_purchase_url = 2;
+}
+
+message Link {
+  optional string title = 1;
+  optional string url = 2;
+  optional string description = 3;
+  optional string image = 4;
+}
+
+message AICommentary {
+  optional string ai_assistant_says = 1 [json_name="ai_assistant_says"];
+  optional string ai_suggests = 2 [json_name="ai_suggests"];
+  optional string expert_insights = 3 [json_name="expert_insights"];
+  optional string recommendation = 4;
+  optional string interesting_facts = 5 [json_name="interesting_facts"];
+  optional string learn_more = 6 [json_name="learn_more"];
+  optional string real_or_fake = 7 [json_name="real_or_fake"];
+  optional string market_demand = 8 [json_name="market_demand_and_value_analysis"];
+}
+
+message CategoryInfo {
+  // info block type (coinInfo, foodInfo, etc.)
+  string type = 1;
+  // category-specific fields
+  map<string, string> fields = 2;
+  // nested structured data
+  google.protobuf.Struct metadata = 3;
+}
+
+message ShoppingProduct {
+  optional string title = 1;
+  optional string price = 2;
+  optional string currency = 3;
+  optional string url = 4;
+  optional string image = 5;
+  // e.g. "google", "amazon"
+  optional string source = 6;
+  optional double rating = 7;
+  optional int32 reviews_count = 8 [json_name="reviews_count"];
+}
+
+message ShoppingResult {
+  repeated ShoppingProduct products = 1;
+  // search query used
+  optional string query = 2;
+}
+
+message VideoResult {
+  optional string title = 1;
+  optional string url = 2;
+  optional string thumbnail = 3;
+  // e.g. "youtube"
+  optional string source = 4;
+  optional string duration = 5;
+}
+
+message RecipeResult {
+  optional string title = 1;
+  optional string url = 2;
+  optional string image = 3;
+  optional string source = 4;
+  optional string cook_time = 5 [json_name="cook_time"];
+  optional double rating = 6;
+}
+
+message DiscoverResult {
+  repeated ShoppingProduct products = 1;
+  repeated VideoResult videos = 2;
+  repeated RecipeResult recipes = 3;
+  repeated Link related_links = 4 [json_name="related_links"];
+}
+
+message ExtendedScanResult {
+  // base scan result
+  ScanResult scan = 1;
+  // buy now products
+  ShoppingResult shopping = 2;
+  // related content
+  DiscoverResult discover = 3;
+}
+
+message ScanHistoryItem {
+  string id = 1;
+  string title = 2;
+  optional string category_type = 3;
+  optional string image_url = 4;
+  optional string thumbnail = 5;
+  optional int64 created_at = 6;
+}
+
+message ScanHistoryList {
+  repeated ScanHistoryItem items = 1;
+}
+
+// =====================================================================
+// Typed request envelopes — no BaseRequest (Rust picks the provider).
+// =====================================================================
+
+message VisualSearchRequest {
+  // Image URL (file:// or http(s)://) to visually match.
+  string file = 1;
+}
+
+message ShoppingRequest {
+  // Free-text query — searches the configured shopping endpoint.
+  string query = 1;
+}
+
+message DescribeRequest {
+  // Image URL to caption / describe.
+  string file = 1;
+  // Optional scan category for context (e.g. "object", "food").
+  string category = 2;
+}
+
+service VisionService {
+  rpc Scan(ScanRequest) returns (ScanResult);
+  rpc VisualSearch(VisualSearchRequest) returns (DiscoverResult);
+  rpc Shopping(ShoppingRequest) returns (ShoppingResult);
+  rpc Describe(DescribeRequest) returns (ScanResult);
+}
+

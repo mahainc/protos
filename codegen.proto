@@ -1,0 +1,61 @@
+// Meta-proto driving protoc-gen-flow-kit code-generation knobs. Each
+// option here is a hint the plugin reads off the rpc/message/field
+// descriptor; nothing here changes wire shapes or is consumed by Rust.
+//
+// Uses proto2 syntax because proto3 forbids `extend` outside of the
+// descriptor.proto option types. The file is NOT generated to Swift by
+// `make proto` — only the plugin reads it (via the checked-in
+// codegen.pb.swift under tools/protoc-gen-flow-kit/Sources/).
+
+syntax = "proto2";
+
+package asyncify.codegen;
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.MethodOptions {
+  // True = protoc-gen-flow-kit emits NO wrapper for this rpc. The
+  // `<Prefix>Method` enum case is still emitted (so dispatch via the
+  // method-name path still resolves), but no `extension TaskWasmProtocol`
+  // wrapper appears. Use for rpcs whose typed wrapper would be
+  // wire-incorrect for the current Rust contract — e.g. streaming
+  // chat that owns its own host driver, or rpcs that expect a
+  // hand-rolled transport envelope on the wire.
+  optional bool skip_flow_kit = 50001;
+
+  // Override the Swift case name on the `<Prefix>Method` enum AND on
+  // every wrapper's `.<case>` dispatch line. Use when the mechanical
+  // lowerCamel of the rpc name hits a Swift keyword (`Init →
+  // \`init\``) and you want a friendlier rename like `providerInit`.
+  optional string swift_case = 50002;
+
+  // True = emit ONLY the `*Task()` raw variant (no typed unpack
+  // wrapper). Use for rpcs that return `asyncify.task.Task` because
+  // they fire-and-forget an OTel event with no useful proto payload —
+  // a typed unpack would either crash or yield empty data.
+  optional bool task_only = 50003;
+}
+
+extend google.protobuf.EnumOptions {
+  // True = emit an `argString` extension that maps each enum case to
+  // the Rust wire-format string. Mechanical default per case = strip
+  // the enum's screaming-snake type prefix from the value name (e.g.
+  // `BREAKDOWN_FACET_BY_SET → BY_SET`); a value named `*_UNSPECIFIED`
+  // (or the bare `UNSPECIFIED`) defaults to "". Use per-case
+  // `(arg_string)` to override divergent labels.
+  optional bool gen_arg_string = 50010;
+
+  // Override the wire-format string for the SYNTHETIC
+  // `.UNRECOGNIZED` case swift-protobuf adds to every proto3 enum.
+  // Defaults to "". Use when the wire fallback should be a real
+  // value (e.g. `AnalyticsWindow.UNRECOGNIZED → "3M"`).
+  optional string unrecognized_arg_string = 50011;
+}
+
+extend google.protobuf.EnumValueOptions {
+  // Override the wire-format string for this enum value, replacing
+  // the mechanical default. Used for divergent labels that don't
+  // follow the strip-prefix rule (e.g. `ONE_DAY → "1D"`,
+  // `MAGIC_THE_GATHERING → "MTG"`).
+  optional string arg_string = 50020;
+}

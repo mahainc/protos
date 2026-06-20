@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+import "codegen.proto";
+import "types.proto";
+
+package asyncify.user;
+
+option swift_prefix = "User";
+
+// =====================================================================
+// Device notification settings — backed by the `device` Rust module.
+// =====================================================================
+
+message SetNotificationRequest {
+  // "true" / "false" — wire format is string because the Rust shared
+  // validator only reads args via string_for_field.
+  string enabled = 1;
+  // FCM token (empty when permission denied or not yet vended).
+  string firebase_token = 2;
+  // Firebase Auth uid when signed in; absent for anonymous device.
+  string firebase_uid = 3;
+  // Apple Live Activities push-to-start token (lowercase hex).
+  string live_activity_token = 4;
+  // Apple WidgetKit push token for background widget refreshes.
+  string widget_token = 5;
+  // Must be the runtime-reflected `String(describing:
+  // WasmLiveActivityAttributes.self)` so backend's APNs
+  // `attributes-type` matches the iOS spawn target. Mismatch → silent
+  // drop.
+  string live_activity_attributes_type = 6;
+}
+
+message GetNotificationSettingsRequest {}
+
+message NotificationSettings {
+  // Whether push notifications are enabled for this device.
+  bool enabled = 1;
+  // FCM topics this device is subscribed to (server-side).
+  repeated string topics = 2;
+}
+
+// =====================================================================
+// Surveys
+// =====================================================================
+
+message SubmitSurveyRequest {
+  // Full Q&A JSON object — each entry has question text + answer
+  // value. Example:
+  //   {"q1":{"question":"What brings you here?","answer":"scanning"},...}
+  string qa_json = 1;
+  // ISO-8601 timestamp when the survey was completed client-side.
+  string completed_at = 2;
+}
+
+// =====================================================================
+// Account deletion (GDPR-style purge)
+// =====================================================================
+
+message DeleteUserRequest {
+  // Firebase Auth UID for this user. Omit when the device was not
+  // signed in — backend then purges per-device records only, keyed
+  // by (bundle_id, device_id).
+  string firebase_uid = 1;
+}
+
+// =====================================================================
+// Notification subscribe (favourites)
+// =====================================================================
+
+message NotificationSubscribeRequest {
+  // Entity kind being (un)subscribed — free-form namespace, e.g.
+  // "team", "competition", "match".
+  string entity = 1;
+  // Entity id within the namespace.
+  string id = 2;
+  // "true" / "false" — string for the shared Rust validator.
+  string enabled = 3;
+}
+
+// =====================================================================
+// Live Activity push-token reporter
+// =====================================================================
+
+message ReportLiveActivityTokenRequest {
+  // Entity namespace, currently always "match".
+  string entity = 1;
+  // Entity id within `entity`.
+  string entity_id = 2;
+  // Lowercase hex APNs Live-Activity token. Empty = activity ended
+  // / dismissed; backend retires the row.
+  string la_token = 3;
+}
+
+service UserService {
+  // Notification settings — backend OTel emit, no useful response.
+  rpc SetNotification(SetNotificationRequest) returns (asyncify.types.Void);
+  rpc GetNotificationSettings(GetNotificationSettingsRequest) returns (NotificationSettings);
+
+  // Surveys — fire-and-forget event.
+  rpc SubmitSurvey(SubmitSurveyRequest) returns (asyncify.types.Void);
+
+  // Account deletion (GDPR purge event).
+  rpc DeleteUser(DeleteUserRequest) returns (asyncify.types.Void);
+
+  // Subscribe / unsubscribe to entity push fan-out.
+  rpc NotificationSubscribe(NotificationSubscribeRequest) returns (asyncify.types.Void);
+
+  // Report APNs Live-Activity push token for an entity.
+  rpc ReportLiveActivityToken(ReportLiveActivityTokenRequest) returns (asyncify.types.Void);
+}

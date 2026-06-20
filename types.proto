@@ -1,0 +1,185 @@
+syntax = "proto3";
+
+package asyncify.types;
+
+import "google/protobuf/struct.proto";
+
+option swift_prefix = "Types";
+
+// Shared host-side dispatch fields embedded into rpc requests that
+// the host pins per call. Used across services (openai, aiart,
+// blobstore, …). The protoc-gen-flow-kit plugin recognizes this
+// message by its bare name and lifts each scalar field as a wrapper
+// param. The plugin's dispatch call routes `provider_id` through
+// `run(method:providerId:args:)` for the host-special-cased path;
+// the remaining fields are flattened into the args bag by the host
+// helper `argsFromRequestFlatteningBase(_:)` so Rust reads them
+// from top-level `args["X"]` like any other action arg.
+message BaseRequest {
+  // Empty falls back to the persisted provider_strategy picker;
+  // non-empty short-circuits to that provider id.
+  optional string provider_id = 1 [json_name="provider_id"];
+  // Override the engine's default `cache_dir` for this call. Empty
+  // = host uses `TaskWasmEngine.defaultCacheDir`. Plugins persist
+  // session state (CAI tokens, Collectr account_id, …) under this
+  // root so different cache dirs isolate identity between calls.
+  optional string cache_dir = 2 [json_name="cache_dir"];
+}
+
+message Image {
+  optional string id = 1;
+  optional string url = 2;
+  // base64 data
+  Bytes data = 3;
+  // blur, mime
+  google.protobuf.Struct metadata = 4;
+}
+
+message Bytes {
+  oneof data {
+    bytes raw = 1;
+    Pointer ptr = 2;
+  }
+}
+
+message Pointer {
+  uint32 ptr = 1;
+  uint32 len = 2;
+}
+
+message String {
+  oneof data {
+    string raw = 1;
+    Pointer ptr = 2;
+  }
+}
+
+message Void {
+}
+
+message Error {
+  int32 code = 1;
+  string reason = 2;
+}
+
+message WAFuture {
+  uint32 data = 1;
+  uint32 len = 2;
+  uint32 callback = 3;
+  uint32 context = 4;
+  uint32 context_len = 5;
+  uint32 index = 6;
+}
+
+message WAString {
+  uint32 ptr = 1;
+  uint32 len = 2;
+}
+
+message Field {
+  string type = 1;
+  string value = 2;
+}
+
+message Entry {
+  string id = 1;
+  string name = 2;
+  string desc = 3;
+}
+
+message Rect {
+  Point origin = 1;
+  Size size = 2;
+}
+
+message Point {
+  double x = 1;
+  double y = 2;
+}
+
+message Size {
+  double width = 1;
+  double height = 2;
+}
+
+message Argument {
+  string name = 1;
+  optional string desc = 2;
+  Validator validator = 3;
+}
+
+message Validator {
+  message Int {
+    optional int32 min = 1;
+    optional int32 max = 2;
+    optional int32 default = 3;
+  }
+  message Double {
+    optional double min = 1;
+    optional double max = 2;
+    optional double default = 3;
+  }
+  message String {
+    optional uint32 min = 1;
+    optional uint32 max = 2;
+    optional string default = 3;
+    optional string prefix = 4;
+    optional string suffix = 5;
+    optional string regex = 6;
+  }
+  message Media {
+    string mime = 1;
+    optional uint64 file_size = 2;
+    optional uint32 dpi = 3;
+    optional Size resolution = 4;
+    repeated Format formats = 6;
+  }
+  bool required = 1;
+  oneof data {
+    Media media = 2;
+    Int int = 3;
+    Double double = 4;
+    String string = 5;
+  }
+}
+
+message Format {
+  message Audio {
+    string format = 1;
+    optional double sample_rate = 2;
+    optional uint32 bit_depth = 3;
+    optional uint32 channels = 4;
+    optional double duration = 5;
+  }
+  message Video {
+    optional double duration = 5;
+  }
+  message Image {
+  }
+  Audio audio = 1;
+  Video video = 2;
+  Image image = 3;
+}
+
+message ListStrings {
+  repeated string values = 1;
+}
+
+message ModelInfo {
+  string id = 1;
+  string name = 2;
+  string owned_by = 3;
+  // Per-domain bag. aiart plugins set
+  // `metadata.fields["aspect_ratios"]` to a `listValue` of strings
+  // (e.g. ["1:1","9:16","16:9","4:5"]) — the View filters the
+  // ratio picker by the currently-selected model's list.
+  google.protobuf.Struct metadata = 4;
+}
+
+message ListModels {
+  repeated ModelInfo data = 1;
+  int32 total = 2;
+  int32 offset = 3;
+  int32 limit = 4;
+}
+
