@@ -434,6 +434,12 @@ message WebPage {
   // no clips or when the WebPage is used for non-video types
   // (leagues, teams, competitions, discovers).
   repeated Video videos = 7;
+  // Parent competition from backend `metadata.competition` (videos
+  // feed only). Carries id, name, and — after the backend alias
+  // overlay — image/region. Lets the video card show the competition
+  // logo and link to its detail; `subtitle` still mirrors the name
+  // for plain text display. Absent for non-video WebPage types.
+  Competition competition = 8;
 }
 
 // List wrappers used as task::Task.value targets for each livescore action.
