@@ -428,6 +428,12 @@ message WebPage {
   string id = 5;
   // UNIX timestamp; populated for Highlights items
   int64 datetime = 6;
+  // Per-match highlight clips from backend `metadata.videos[]`.
+  // Each entry is a Scorebat video embed (title, iframe HTML,
+  // YouTube source URL, poster image). Empty when the item has
+  // no clips or when the WebPage is used for non-video types
+  // (leagues, teams, competitions, discovers).
+  repeated Video videos = 7;
 }
 
 // List wrappers used as task::Task.value targets for each livescore action.

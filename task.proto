@@ -7,6 +7,10 @@ import "google/protobuf/struct.proto";
 import "types.proto";
 
 option swift_prefix = "WaT";
+// Java/Kotlin outer class. Without this, protoc defaults to
+// `TaskOuterClass` (the top-level `message Task` collides with the
+// basename-derived default), diverging from the committed `WaT.java`.
+option java_outer_classname = "WaT";
 
 enum CallID {
   CALL_ID_UNSPECIFIED = 0;
