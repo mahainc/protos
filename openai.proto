@@ -358,6 +358,30 @@ message SuggestResponse {
   repeated string suggestions = 1;
 }
 
+// ListProviders --------------------------------------------------------
+// Enumerates every currently-registered chat provider. Lets Swift
+// build provider-aware UIs (e.g. the create-character picker) without
+// piggybacking on a `list_models` page — which only ever surfaces the
+// providers that happen to be present in the current page's rows.
+message ListProvidersRequest {
+  asyncify.types.BaseRequest base = 1;
+}
+// One row per registered chat provider.
+message ProviderInfo {
+  // Ciphered plugin app_id — use verbatim as `providerID:` pin on
+  // subsequent openAI rpcs.
+  string id = 1;
+  // Display name (`Plugin::provider_name()` — e.g. "Character AI",
+  // "VTN", "OpenAI", "OneAI").
+  string name = 2;
+  // Whether `Plugin::supports_create_model()` is true. Swift filters
+  // on this for the create-character picker.
+  bool creatable = 3;
+}
+message ListProvidersResponse {
+  repeated ProviderInfo providers = 1;
+}
+
 // ListModels -----------------------------------------------------------
 message ListModelsRequest {
   // search keyword filter (matches name/description server-side)
@@ -566,6 +590,15 @@ service OpenAIService {
   // once (not per-plugin). Wire return is the shared
   // `asyncify.types.ListModels{data,total,offset,limit}` envelope.
   rpc ListModels(ListModelsRequest) returns (asyncify.types.ListModels);
+
+  // Provider catalog — registered once (not per-plugin). Returns one
+  // row per chat provider currently in `task::REGISTRY` (i.e. every
+  // provider with the chat action registered, regardless of whether
+  // it came from `plugins::registry()` or from a direct registration
+  // in `task::openai::mod::builders`). Lets the host filter by
+  // `creatable` for the create-character picker without scanning a
+  // paginated model list.
+  rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse);
 
   // Create a custom persona/character (CAI-shaped). Only registered
   // for plugins whose Plugin::supports_create_model() is true.

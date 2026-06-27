@@ -35,25 +35,31 @@ message Erase {
 
 // =====================================================================
 // Typed request envelopes — flat string fields land as `args["X"]`
-// for `cmd.string_for_field("X")` reads. No BaseRequest: inpaint
-// dispatch lets Rust's provider_strategy pick the provider; the
-// Swift host doesn't pin per-call.
+// for `cmd.string_for_field("X")` reads. Every request carries
+// `BaseRequest base = 1` so callers can pin `cache_dir` (test
+// isolation, session pinning) and optionally `provider_id`. The
+// host flattens `base` via `argsFromRequestFlatteningBase`, so
+// existing Rust readers (`string_for_field("cache_dir")`) work
+// unchanged.
 // =====================================================================
 
 message AutoSuggestionRequest {
+  asyncify.types.BaseRequest base = 1;
   // Source image URL — `file://`, `data:` URI, or `http(s)://`.
-  string image = 1;
+  string image = 2;
 }
 
 message EnhanceRequest {
-  string image = 1;
+  asyncify.types.BaseRequest base = 1;
+  string image = 2;
   // 2 / 4 / 8 — sent as a string to match the wire (Rust reads via
   // `string_for_field`). Empty defaults to 2 on the Rust side.
-  string zoom_factor = 2 [json_name="zoom_factor"];
+  string zoom_factor = 3 [json_name="zoom_factor"];
 }
 
 message RemoveBgRequest {
-  string image = 1;
+  asyncify.types.BaseRequest base = 1;
+  string image = 2;
 }
 
 // Either `image` (start a new erase session) or `session_id`
@@ -61,29 +67,34 @@ message RemoveBgRequest {
 // arrives as either `mask_brush` (drawn mask file URL) or
 // `mask_objects` (comma-joined ids from `AutoSuggestion.segments`).
 message EraseRequest {
-  optional string image = 1;
-  optional string session_id = 2 [json_name="session_id"];
-  optional string mask_brush = 3 [json_name="mask_brush"];
-  optional string mask_objects = 4 [json_name="mask_objects"];
+  asyncify.types.BaseRequest base = 1;
+  optional string image = 2;
+  optional string session_id = 3 [json_name="session_id"];
+  optional string mask_brush = 4 [json_name="mask_brush"];
+  optional string mask_objects = 5 [json_name="mask_objects"];
 }
 
 message SkinBeautyRequest {
-  string image = 1;
+  asyncify.types.BaseRequest base = 1;
+  string image = 2;
 }
 
 message SkyRequest {
-  string image = 1;
+  asyncify.types.BaseRequest base = 1;
+  string image = 2;
 }
 
 message TryOnRequest {
+  asyncify.types.BaseRequest base = 1;
   // Person/model photo.
-  string image = 1;
+  string image = 2;
   // Garment image to dress the model in.
-  string cloth_image = 2 [json_name="cloth_image"];
+  string cloth_image = 3 [json_name="cloth_image"];
 }
 
 message ClothesRequest {
-  string image = 1;
+  asyncify.types.BaseRequest base = 1;
+  string image = 2;
 }
 
 // Inpaint actions reachable via gRPC-style method names. Routes

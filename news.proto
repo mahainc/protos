@@ -1,0 +1,156 @@
+syntax = "proto3";
+
+import "codegen.proto";
+import "google/protobuf/struct.proto";
+
+package asyncify.news;
+
+option swift_prefix = "News";
+
+// Wire types for the backend `/mobile/news` route — the category-
+// agnostic news feed. The wasm news module proxies every request to
+// the backend `/serverless/mobile/news` endpoint and deserializes the
+// JSON response directly into these proto-generated Rust types, so
+// the field names/order/types mirror the backend
+// `crates/news-core::{NewsRequest, NewsResponse}` exactly.
+//
+// The proto is intentionally agnostic: nothing here is soccer- or
+// health-specific. Category-specific overlays (in-review, national,
+// FIFA, rollup snapshots for soccer; tag enrichment for health) all
+// happen server-side; what arrives on the wire is a flat row stream
+// plus the closed tag vocabulary for the requested category.
+
+// Vertical the news feed is sourced from. Serialized on the wire as
+// the lowercase token so the backend's `NewsRequest.category: String`
+// deserializes one-to-one with no custom mapping. New verticals are
+// added here as new enum values; the Rust task layer just forwards
+// the value through to the backend.
+enum NewsCategory {
+  option (asyncify.codegen.gen_arg_string) = true;
+  NEWS_CATEGORY_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = ""];
+  NEWS_CATEGORY_SOCCER = 1 [(asyncify.codegen.arg_string) = "soccer"];
+  NEWS_CATEGORY_HEALTH = 2 [(asyncify.codegen.arg_string) = "health"];
+}
+
+// Sort mode forwarded as the request body's `sort` string. Backend
+// (`crates/news-core::NewsRequest.sort`) accepts `"recent"` (default;
+// published_at DESC) and `"trending"` (trailing-7-day shortlink
+// resolves DESC). The trending sort is ignored server-side when `q` is
+// set — the FTS path stays chronological.
+enum NewsSort {
+  option (asyncify.codegen.gen_arg_string) = true;
+  NEWS_SORT_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = ""];
+  NEWS_SORT_RECENT = 1 [(asyncify.codegen.arg_string) = "recent"];
+  NEWS_SORT_TRENDING = 2 [(asyncify.codegen.arg_string) = "trending"];
+}
+
+// One article row returned by `/mobile/news`. Field shape verified
+// 2026-06-25 against the live `staging.snapai.app/serverless/mobile/
+// news` endpoint — every typed field below is present in the actual
+// JSON. Per-row tag assignment lives inside `metadata.tags`, NOT at
+// row level; soccer rows carry `metadata.competition_ids` and
+// `metadata.team_ids`.
+message NewsItem {
+  // Ingester-supplied article slug. Stable across re-crawls and
+  // safe to use as a list-row identity.
+  string id = 1;
+  // Headline as published by the source. Already HTML-decoded by
+  // the ingester.
+  string title = 2;
+  // Backend shortlink URL (`/serverless/mobile/s/<hash>`), NOT the
+  // source's raw permalink. Decoded by the backend redirect.
+  string url = 3;
+  // Lead image URL. Empty when the article has no image; renderers
+  // should fall back to a category placeholder.
+  string image_url = 4;
+  // Source slug (e.g. `"football365"`, `"runners-world"`) — the
+  // ingester's normalized identifier, not a display name.
+  string source = 5;
+  // Byline / author string. Empty when the article didn't expose
+  // one or the ingester couldn't parse it.
+  string author = 6;
+  // Publication time as RFC 3339 UTC (e.g.
+  // `"2026-06-25T07:40:40Z"`). Parsed in Swift via the standard ISO
+  // formatter; opaque to Rust except for sort comparisons.
+  string published_at = 7;
+  // Category slug echoed from the request (`"soccer"` /
+  // `"health"`). Useful for /mobile/news cross-category endpoints
+  // where the response mixes verticals.
+  string category = 8;
+  // Read count (engagement metric). Increments server-side; 0 on a
+  // freshly-ingested row.
+  int64 hits = 9;
+  // Per-row enrichment payload — `mobile.news.metadata` JSONB
+  // dumped verbatim. Known keys: `importance` (i32, 0=normal,
+  // higher=featured), `summary` (string, may be empty), `tags`
+  // (string[], present for categories with a closed vocabulary like
+  // health), `competition_ids` / `team_ids` (string[], soccer
+  // only). Renderers cherry-pick what they need.
+  google.protobuf.Struct metadata = 10;
+}
+
+// =====================================================================
+// Typed request envelope for NewsService.
+// =====================================================================
+
+message NewsRequest {
+  // Vertical to fetch. Required — the backend rejects an empty
+  // category with HTTP 400.
+  NewsCategory category = 1;
+  // Page size. Server clamps to [1, 100]; default 30 when unset.
+  optional int64 limit = 2;
+  // Offset-based cursor. Callers paginate by tracking
+  // `offset + items.len()` and stopping when the row count drops
+  // below `limit` (the backend's `next_offset` is collapsed away).
+  optional int64 offset = 3;
+  // Full-text filter — postgres `plainto_tsquery`. Server caps
+  // length at 200 chars; empty/whitespace is ignored.
+  optional string q = 4;
+  // OR-match against the row's tag set. Values must come from the
+  // category's vocabulary (see `NewsResponse.tags_vocabulary`);
+  // unknown values match no rows.
+  repeated string tags = 5;
+  // Sort mode. `UNSPECIFIED` (default) → backend default (`recent`).
+  // `TRENDING` re-orders by trailing-7-day shortlink resolves; the
+  // backend silently falls back to chronological when `q` is set, so
+  // this field has no effect during a search.
+  NewsSort sort = 6;
+  // Category-specific filter params, forwarded to the backend request
+  // body verbatim. Lets each vertical surface its own narrowing knobs
+  // without growing the proto per-category:
+  //   • soccer  → `competition_id`, `team_id` (string ids; the backend
+  //     accepts numeric strings or raw ints)
+  //   • future  → whatever the vertical's `/mobile/news` overlay reads
+  // Unknown keys for a category are ignored by the backend. Empty map
+  // = no extra filters. Keys MUST be the snake_case wire names the
+  // backend expects (matches `crates/news-core::NewsRequest` field
+  // names), not the Swift/proto camelCase form.
+  map<string, string> params = 7;
+}
+
+// `/mobile/news` response. Field set verified 2026-06-25 against
+// the live `staging.snapai.app/serverless/mobile/news` endpoint.
+message NewsResponse {
+  // Articles in published-at-DESC order, after any server-side
+  // category-specific overlays have been applied.
+  repeated NewsItem items = 1;
+  // Next offset to pass back as the request's `offset` for
+  // pagination. `items.len()` < requested `limit` is the canonical
+  // end-of-feed signal; callers don't strictly need this cursor
+  // but it short-circuits one extra round-trip when the count
+  // equals the limit.
+  int64 next_offset = 2;
+  // Closed tag vocabulary for the requested category. Empty list
+  // for categories without a taxonomy (e.g. soccer); for health,
+  // the 16-element `HEALTH_TAGS` set: calories, nutrition,
+  // weight-loss, diet, blood-pressure, heart-rate, cardiovascular,
+  // diabetes, blood-sugar, exercise, fitness, sleep, hydration,
+  // mental-health, stress, general-wellness. Wire key is `tags`,
+  // NOT `tags_vocabulary`.
+  repeated string tags = 3 [json_name="tags"];
+}
+
+service NewsService {
+  // Single endpoint mirroring `POST /mobile/news` on the backend.
+  rpc List(NewsRequest) returns (NewsResponse);
+}
