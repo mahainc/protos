@@ -89,6 +89,20 @@ message SurveySubmitted {
   string completed_at = 4;
 }
 
+// Fired after a voice is created via the `create_voice` action.
+message VoiceCreated {
+  // provider-assigned voice id (ciphered in transit)
+  string voice_id = 1;
+  // user-facing display name
+  string voice_name = 2;
+  // user-submitted visibility
+  string visibility = 3;
+  // user-submitted gender
+  string gender = 4;
+  // Ciphered plugin app_id
+  string provider_id = 5;
+}
+
 // Fired when the user enables or disables notifications for a domain
 // entity such as a team, league or competition. `enabled = true` means
 // subscribe, `false` means unsubscribe — backends should treat both as
@@ -150,6 +164,15 @@ message LiveActivityToken {
   string la_token = 5;
 }
 
+// Fired after a voice is deleted via the `delete_voice` action.
+// The backend uses `voice_id` to DELETE the row from `mobile.voices`.
+message VoiceDeleted {
+  // provider-assigned voice id (ciphered in transit)
+  string voice_id = 1;
+  // Ciphered plugin app_id
+  string provider_id = 2;
+}
+
 // Envelope used on the wire so the backend can route by event kind
 // without guessing from `payload.name`.
 message Event {
@@ -161,6 +184,8 @@ message Event {
     NotificationSubscribe notification_subscribe = 5;
     UserDeleted user_deleted = 6;
     LiveActivityToken live_activity_token = 7;
+    VoiceCreated voice_created = 8;
+    VoiceDeleted voice_deleted = 9;
   }
 }
 

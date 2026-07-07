@@ -1,0 +1,650 @@
+syntax = "proto3";
+
+import "codegen.proto";
+import "google/protobuf/struct.proto";
+import "types.proto";
+
+package asyncify.funnel;
+
+option swift_prefix = "WaFunnel";
+// Java/Kotlin outer class — pin it so protoc doesn't derive a colliding
+// default from the basename (same rationale as task.proto's WaT).
+option java_outer_classname = "WaFunnel";
+
+// RC-driven monetization funnel, computed entirely in the wasm guest.
+//
+// Per touchpoint the host calls OpenGate and executes the returned
+// GateInstruction (show ad / paywall / skip) plus any preload[]. The guest
+// owns every decision: premium (from flows::Options.premium), cooldown /
+// frequency / caps (epoch_time + persisted state + parsed ad_config),
+// regional/version config merge, and the on-device transition model that
+// predicts which ad units to preload next.
+//
+// This service block is what makes protoc-gen-flow-kit emit the call wrappers
+// (Swift wasm.funnel.*, Kotlin, Rust funnel_service::*). Dispatch rides the
+// task system (task::funnel::method_builders()); responses ride in
+// task::Task.value.
+//
+// ResolveSlot was folded into Introspect on 2026-07-02 — slot lookup was only
+// useful for debug UIs, which now get every slot + counter in one shot.
+// SetArm was dropped 2026-07-02 — the arm comes from `funnel_arm_id` in the
+// RC map, so Configure already sets it. QA arm forcing = pass a doctored RC
+// via StaticFileConfigSource; mid-run re-enrollment = re-Configure (state
+// hydrates, not wipes).
+service FunnelService {
+  // Parse the full RC snapshot (+ region/app_version), (re)build the engine,
+  // migrate persisted learned-state across a graph change, persist.
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  // Evaluate one monetization touchpoint. Request is feature_id ONLY —
+  // premium/cooldown/caps are computed in-guest.
+  rpc OpenGate(OpenGateRequest) returns (GateInstruction);
+  // Forward a behavior event (fed by the host's Firebase logEvent swizzle);
+  // updates the transition model and returns predicted preloads.
+  rpc LogEvent(LogEventRequest) returns (LogEventResponse);
+  // Read-only debug snapshot: arm + config_revision + graph_version + per-gate
+  // rows (feature_id, type, resolved unit_id, attempts, show rate) + ready_units.
+  // Meant for a debug UI / QA panel. Zero side effects.
+  rpc Introspect(IntrospectRequest) returns (IntrospectResponse);
+  // Periodic maintenance hook. Flushes locally persisted analytics batches to the
+  // remote ingestion endpoint. Hosts call this on a timer / lifecycle tick so
+  // OpenGate stays local-only and never waits on network.
+  rpc Tick(TickRequest) returns (TickResponse);
+}
+// Ad-lifecycle reporting rides the existing LogEvent swizzle path, NOT a
+// dedicated rpc. Firebase Analytics auto-logs `ad_impression`; the host
+// AdExecutor fires `Analytics.logEvent` for the other lifecycle events
+// (`ad_load_succeeded`, `ad_load_failed`, `ad_dismissed`, `ad_expired`) with
+// `ad_unit_name` in params — same param key AdMob uses on impressions. The
+// guest parses these inside `log_event`, updates its `ready_units` truth set,
+// and refuses to emit SHOW_AD for cold units (falls back to
+// Skip("ad_not_ready") + preload[]).
+//
+// Peek was considered and dropped: `OpenGate` already carries the info a
+// caller needs to branch (action + skip_reason). Slot table / arm inspection
+// now rides `Introspect`.
+
+// Gate kind. Mirrors GateType the engine stores per feature_id. OFF is an
+// explicit kill switch distinct from enabled=false.
+enum GateType {
+  GATE_TYPE_UNSPECIFIED = 0;
+  GATE_TYPE_OFF = 1;
+  GATE_TYPE_IAP = 2;
+  GATE_TYPE_POPUP = 3;
+  GATE_TYPE_INTER = 4;
+  GATE_TYPE_REWARD = 5;
+  GATE_TYPE_NATIVE = 6;
+  GATE_TYPE_RESUME = 7;
+  GATE_TYPE_BANNER = 8;
+}
+
+// Canonical event names crossing Firebase → swizzle → guest. Consumers emit
+// via `FunnelSession.emit(_:)` with a typed wrapper backed by these cases so
+// there's no way to misspell (`paywall_purchase` typo becomes a compile
+// error). The `arg_string` alias is the exact Firebase event name string —
+// `WaFunnelEventName.paywallShown.rawName == "paywall_shown"`.
+//
+// Not every guest-consumed event lives here — Firebase auto-emits
+// `screen_view` and `ad_impression` under those literal names, and the guest
+// matches them via string literals in `log_event`. Those are documented
+// separately (guest side) so we don't have to fake-declare them here.
+enum FunnelEventName {
+  option (asyncify.codegen.gen_arg_string) = true;
+  FUNNEL_EVENT_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = ""];
+  // Ad lifecycle — fired by the host's AdExecutor bridge.
+  FUNNEL_EVENT_AD_LOAD_SUCCEEDED = 1 [(asyncify.codegen.arg_string) = "ad_load_succeeded"];
+  FUNNEL_EVENT_AD_LOAD_FAILED = 2 [(asyncify.codegen.arg_string) = "ad_load_failed"];
+  FUNNEL_EVENT_AD_DISMISSED = 3 [(asyncify.codegen.arg_string) = "ad_dismissed"];
+  FUNNEL_EVENT_AD_EXPIRED = 4 [(asyncify.codegen.arg_string) = "ad_expired"];
+  // Paywall lifecycle — fired by FunnelSession.presentPaywall +
+  // endPaywallSession; app code rarely emits these directly.
+  FUNNEL_EVENT_PAYWALL_SHOWN = 10 [(asyncify.codegen.arg_string) = "paywall_shown"];
+  FUNNEL_EVENT_PAYWALL_PURCHASED = 11 [(asyncify.codegen.arg_string) = "paywall_purchased"];
+  FUNNEL_EVENT_PAYWALL_CANCELLED = 12 [(asyncify.codegen.arg_string) = "paywall_cancelled"];
+  FUNNEL_EVENT_PAYWALL_FAILED = 13 [(asyncify.codegen.arg_string) = "paywall_failed"];
+  FUNNEL_EVENT_PAYWALL_DISMISSED = 14 [(asyncify.codegen.arg_string) = "paywall_dismissed"];
+  FUNNEL_EVENT_PAYWALL_SKU_SELECTED = 15 [(asyncify.codegen.arg_string) = "paywall_sku_selected"];
+  // GA4 canonical revenue event — fired by endPaywallSession when a
+  // FunnelPurchaseResult.completed is passed. Different from
+  // paywall_purchased because GA4 only rolls dollars into totalRevenue for
+  // this reserved name with reserved value+currency params.
+  FUNNEL_EVENT_PURCHASE = 20 [(asyncify.codegen.arg_string) = "purchase"];
+  // Attribution — fired by installAttributionBridge.
+  FUNNEL_EVENT_INSTALL_ATTRIBUTION = 30 [(asyncify.codegen.arg_string) = "install_attribution"];
+}
+
+// Ad format for a preload instruction the host must execute. arg_string is the
+// token the host's ad SDK bridge switches on.
+enum AdType {
+  option (asyncify.codegen.gen_arg_string) = true;
+  AD_TYPE_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = ""];
+  AD_TYPE_INTERSTITIAL = 1 [(asyncify.codegen.arg_string) = "interstitial"];
+  AD_TYPE_REWARDED = 2 [(asyncify.codegen.arg_string) = "rewarded"];
+  AD_TYPE_NATIVE = 3 [(asyncify.codegen.arg_string) = "native"];
+  AD_TYPE_RESUME = 4 [(asyncify.codegen.arg_string) = "resume"];
+  AD_TYPE_BANNER = 5 [(asyncify.codegen.arg_string) = "banner"];
+}
+
+// ── CONFIGURE ────────────────────────────────────────────────────────
+// Host dumps the ENTIRE Remote Config snapshot; the guest selects,
+// suffix+region-merges, and parses. The host is not a config router — it
+// never cherry-picks iap_config/ad_config nor resolves suffix/regional keys.
+message ConfigureRequest {
+  // Persistence + host metadata (cache_dir, uid, region_code, app_version,
+  // premium, …). The task builder flattens `base` into top-level args so
+  // `call.string_for_field("cache_dir")` resolves; without it, `FdStore`
+  // writes to "" and every later rpc reads back None → Skip("not_configured").
+  asyncify.types.BaseRequest base = 1;
+  // Full RC key -> raw value map. Every funnel-relevant key (iap_config,
+  // ad_config, their <key>_<suffix>_<REGION> / <key>_<suffix> / <key>_<REGION>
+  // variants, config_revision, …) as the host read it. The guest picks what
+  // it needs.
+  map<string, string> rc = 2;
+  // Device region (ISO-3166 alpha-2, e.g. "VN"). Combined with `suffix` per
+  // the precedence chain below. Empty = no region override.
+  string region = 3;
+  // App version (e.g. "1.4.0"). Stamped into graph_version for state
+  // migration when the app version changes across releases. NOT used for RC
+  // key selection — that's `suffix`.
+  string app_version = 4;
+  // Host-supplied suffix for RC key selection. Free-form string chosen by the
+  // host to scope config to an app / env / version cohort — e.g. `"example"`
+  // (Example showcase app), `"v1"` / `"v2"` (funnel-schema variants), `"beta"`
+  // (test rollout). Empty = no suffix override. Precedence chain the guest
+  // tries per key `<base>`:
+  //   1. `<base>_<suffix>_<REGION>`   (most specific)
+  //   2. `<base>_<suffix>`
+  //   3. `<base>_<REGION>`
+  //   4. `<base>`                     (fallback)
+  // Same shape as the existing `iap_config_VN` (region-only case).
+  string suffix = 5;
+}
+
+message ConfigureResponse {
+  bool ok = 1;
+  // Echoed config revision (from the rc map), empty on failure.
+  string config_revision = 2;
+  // Number of gates / slots built. Diagnostic.
+  uint32 gate_count = 3;
+  uint32 slot_count = 4;
+  // Populated only when ok=false; previous valid config is retained.
+  string error = 5;
+}
+
+// ── OPEN_GATE ────────────────────────────────────────────────────────
+message OpenGateRequest {
+  // Persistence + host metadata; see ConfigureRequest.base.
+  asyncify.types.BaseRequest base = 1;
+  // Gate to evaluate. Unknown ids -> Skip("unknown_feature"). This is the
+  // ONLY payload field the host supplies; the guest computes
+  // premium/cooldown/caps from flows::Options + parsed ad_config + persisted
+  // state.
+  string feature_id = 2;
+}
+
+// One ad the host should preload after handling the primary action. A RETURNED
+// instruction, not a host callback — the guest can't reach the host ad SDK
+// mid-call.
+message PreloadInstruction {
+  AdType ad_type = 1;
+  string unit_id = 2;
+  // RC slot reference being warmed (for example inter_splash or reward_bonus).
+  // Empty when the preload came from a legacy/unit-only source.
+  string slot_ref = 3;
+  // Feature gate this preload is intended to warm. Empty for generic inventory
+  // such as app-launch splash/fallback preloads that are not tied to one gate.
+  string feature_id = 4;
+}
+
+// Discriminated response. Exactly one payload arm is set. preload rides
+// alongside so a single round-trip both shows gate A and queues the next ad.
+message GateInstruction {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ACTION_SKIP = 1;
+    ACTION_SHOW_PAYWALL = 2;
+    ACTION_SHOW_POPUP = 3;
+    ACTION_SHOW_INTERSTITIAL = 4;
+    ACTION_SHOW_REWARDED = 5;
+    ACTION_SHOW_NATIVE = 6;
+    ACTION_SHOW_RESUME = 7;
+    ACTION_SHOW_BANNER = 8;
+  }
+  Action action = 1;
+  // SHOW_PAYWALL / SHOW_POPUP → feature_id whose plan/template the host renders.
+  string feature_id = 2;
+  // SHOW_* ad actions → resolved ad unit id.
+  // SHOW_PAYWALL / SHOW_POPUP → resolved ad unit id for the paywall gate's
+  // companion ad slot (from `GateSpec.slot_ref` → `ad_config.slots`). See
+  // `companion_action` for the ad kind (inter / rewarded / native / …). Empty
+  // ⇒ no companion ad slot.
+  string unit_id = 3;
+  // SKIP → one of: user_is_premium, gate_disabled, gate_off,
+  // frequency_exhausted, limit_reached, cooldown_active, ads_disabled,
+  // unknown_feature, ad_not_ready.
+  string skip_reason = 4;
+  // Units to preload after executing `action` (may be empty).
+  repeated PreloadInstruction preload = 5;
+  // SHOW_PAYWALL / SHOW_POPUP → fully hydrated plan the host renders.
+  // Guest resolves `feature_gates.<id>.pool_ref` → `pools[pool_ref]` at
+  // Configure time, then attaches this on every paywall/popup instruction so
+  // the app never re-parses iap_config. Empty for non-paywall actions.
+  PaywallPlan plan = 6;
+  // SHOW_REWARDED → credits granted on `userDidEarnReward`.
+  // SHOW_PAYWALL / SHOW_POPUP → credits granted if the user taps the
+  // paywall's companion ad button and (for a rewarded companion) plays it
+  // through to `userDidEarnReward`. Sourced from `GateSpec.reward_credits`
+  // so the host doesn't re-parse ad_config on grant. Absent / 0 on
+  // SHOW_INTERSTITIAL / SHOW_NATIVE / SHOW_RESUME / SHOW_BANNER / SKIP, and
+  // on paywalls whose companion is not a rewarded slot.
+  optional uint32 reward_credits = 7;
+  // SKIP only: milliseconds the host may wait before proceeding. For
+  // `ad_not_ready`, this comes from GateSpec.ad_wait_ms or the global
+  // AdGlobalPolicy.fullscreen_ad_wait_ms default. 0 ⇒ do not wait.
+  uint32 ad_wait_ms = 8;
+  // SHOW_PAYWALL / SHOW_POPUP → the ad Action the host should fire when the
+  // user taps the paywall's companion ad button. Inferred by the guest from
+  // the paywall gate's `slot_ref` prefix (`inter_*` → SHOW_INTERSTITIAL,
+  // `reward_*` → SHOW_REWARDED, `native_*` → SHOW_NATIVE, `resume_*` →
+  // SHOW_RESUME, `banner_*` → SHOW_BANNER). ACTION_UNSPECIFIED on paywalls
+  // without a companion slot and on every non-paywall action.
+  Action companion_action = 9;
+  // SHOW_PAYWALL / SHOW_POPUP / SHOW_NATIVE: milliseconds after the host-owned
+  // view becomes visible before the close affordance is shown/enabled. 0 means
+  // show close immediately. SDK interstitial/rewarded close controls ignore this
+  // because the host does not own those controls.
+  uint32 close_delay_ms = 10;
+  // SHOW_NATIVE only: adjusts the full-screen native close affordance's tappable
+  // area by this many logical pixels/points/dp on each edge. Positive values
+  // expand; negative values shrink. Hosts clamp to a safe range and never use
+  // this for ad click targets.
+  int32 fullscreen_close_hit_slop = 11;
+  // RC slot reference that produced the ad unit on SHOW_* ad actions, or the
+  // companion ad slot on SHOW_PAYWALL / SHOW_POPUP. Empty for SKIP and for
+  // paywalls/popups without companion inventory.
+  string slot_ref = 12;
+}
+
+// A paywall/popup plan the guest hands to the host. Sourced from
+// `iap_config.pools[<pool_ref>]` with each `sku_ref` resolved through the
+// top-level `iap_config.skus` map so the host receives real StoreKit product
+// ids, not RC-authored aliases. Display content isn't typed — the host
+// renders `template` (string token or nested map — see PaywallPool.template).
+message PaywallPlan {
+  // Analytics id for this IAP surface — the token every purchase / show
+  // event carries so the host can slice revenue by paywall variant.
+  string iap_id = 1;
+  // Content id for content-gated flows (e.g. a specific unlockable
+  // template/scene the paywall gates behind purchase). Empty when the
+  // gate is just "premium yes/no".
+  string content_id = 2;
+  // Ordered SKU list — each carries its RC alias + the resolved StoreKit id.
+  repeated PaywallSku skus = 3;
+  // Index into `skus[]` for the default selection. Clamped to `skus.len()-1`
+  // if the RC value is out of range. 0 when the pool omits it.
+  uint32 default_sku_index = 4;
+  // Paywall template — any JSON value. See PaywallPool.template. Absent ⇒
+  // host default.
+  google.protobuf.Value template = 5;
+  // Key in `iap_config.pools` that produced this plan. Events carry it as
+  // `pool_name` so revenue/lift can be sliced by paywall pool/variant.
+  string pool_name = 6;
+}
+
+message PaywallSku {
+  // Alias key from `pool.sku_refs[]`, e.g. "yearly" / "monthly" / "weekly".
+  string ref = 1;
+  // Resolved StoreKit / Play Billing product id via `iap_config.skus[ref]`
+  // — the id the store bills against. Empty ⇒ skus map lookup failed
+  // (host should treat this sku as unavailable).
+  string sku_id = 2;
+}
+
+// ── LOG_EVENT ────────────────────────────────────────────────────────
+// Fed by the host's Firebase logEvent swizzle, NOT hand-wired per site.
+message LogEventRequest {
+  // Persistence + host metadata; see ConfigureRequest.base.
+  asyncify.types.BaseRequest base = 1;
+  string name = 2;                    // screen_view, tab_selected, app_foreground, …
+  google.protobuf.Struct params = 3;  // element_name, tab_name, …
+  // Event time epoch ms (host clock). Advisory; gate windows use the guest's
+  // epoch_time.
+  int64 timestamp_ms = 4;
+  // Screen name for `screen_view` events. Firebase's auto-emitted `screen_view`
+  // populates `firebase_screen` / `firebase_screen_class` in `params`, NOT a
+  // `screen_name` key — so hosts extract the right one and put it here as a
+  // top-level field. Enables the guest's transition-model prediction path
+  // (`predict_preloads`) which is keyed on screen name. Empty ⇒ no
+  // learning/prediction for this event.
+  string screen_name = 5;
+  // Ad unit id for ad-lifecycle events (`ad_impression`, `ad_load_succeeded`,
+  // `ad_load_failed`, `ad_dismissed`, `ad_expired`). Firebase's `ad_impression`
+  // param is called `ad_unit_name` — the host mirrors that key for the other
+  // lifecycle events. The guest uses this to update its `ready_units` truth
+  // set so `open_gate` refuses cold shows.
+  string ad_unit_name = 6;
+  // For `paywall_shown` and its closing events (paywall_purchased /
+  // paywall_cancelled / paywall_dismissed): the host-generated UUID pairing
+  // shown ↔ dismiss so the guest can correlate the two ends of a paywall
+  // session. `feature_id` accompanies the shown event via the `screen_name`
+  // slot (reused for symmetry — same "which surface" concept).
+  string session_id = 7;
+  // For paywall closing events (paywall_purchased / paywall_cancelled /
+  // paywall_dismissed) AND ad_load_failed: a short reason string. Advisory —
+  // the guest logs it but doesn't drive decisions off it.
+  string reason = 8;
+  // For `paywall_shown` events: the feature_id (gate) whose paywall opened.
+  // The guest stores this in its `sessions` map alongside `session_id` so a
+  // later `paywall_purchased`/`paywall_dismissed` can correlate back to the
+  // gate that triggered it.
+  string feature_id = 9;
+}
+
+message LogEventResponse {
+  bool ok = 1;
+  // Newly-predicted units to preload (empty when prediction unchanged).
+  repeated PreloadInstruction preload = 2;
+}
+
+// Paywall/popup lifecycle rides LogEvent, NOT dedicated rpcs. The host fires
+// `paywall_shown` / `paywall_purchased` / `paywall_cancelled` / `paywall_dismissed`
+// via Firebase Analytics (or any wrapper that reaches the swizzle). Params:
+//   session_id   – host-generated UUID that pairs shown ↔ dismiss
+//   feature_id   – gate that opened the session
+//   reason       – on the closing events only (purchased/cancelled/failed/dismissed)
+// The guest reads these inside `log_event`, tracks the sessions map, and can
+// emit paywall analytics to Cloudflare Pipelines the same way it does gate
+// analytics. BeginSession/EndSession were replaced by this in 2026-07-01 —
+// one event pipeline for everything, no bespoke rpcs.
+
+// ── INTROSPECT ────────────────────────────────────────────────────────
+message IntrospectRequest {
+  // Persistence + host metadata; see ConfigureRequest.base.
+  asyncify.types.BaseRequest base = 1;
+}
+
+// One gate row in the introspection snapshot.
+message IntrospectGate {
+  string feature_id = 1;
+  GateType gate_type = 2;
+  bool enabled = 3;
+  // Resolved from slot_ref if set — empty for IAP/POPUP/OFF gates or slot miss.
+  string unit_id = 4;
+  // Legacy alias for `impression_count`. Kept so older debug clients continue
+  // to render a consumption count, but new clients should read
+  // `impression_count` directly.
+  uint32 show_count = 5;
+  // Legacy alias for `max(show_instruction_count, impression_count)`. Kept so
+  // older debug clients keep a non-zero denominator, but new clients should read
+  // `show_instruction_count` directly.
+  uint32 attempt_count = 6;
+  // Current-launch `impression_count / show_instruction_count`; zero when the
+  // guest has emitted no ad show instructions for this gate.
+  double show_rate = 7;
+  // Epoch seconds for the latest successful show instruction. Zero when never
+  // shown.
+  uint64 last_shown_at = 8;
+  // Configured slot reference for this gate, such as inter_news or reward_daily.
+  // Empty for IAP/POPUP/OFF gates that do not attach companion ad inventory.
+  string slot_ref = 9;
+  // Credit cost configured on the gate. Absent means the gate is not credit-gated.
+  optional uint32 credits = 10;
+  // Credits granted when this gate's rewarded ad completes. Absent means this
+  // gate does not grant credits.
+  optional uint32 reward_credits = 11;
+  // Current-launch ad show instructions emitted by the guest for this gate. This
+  // is demand: the host was asked to present a loaded ad. It does not prove the
+  // ad SDK rendered an impression.
+  uint32 show_instruction_count = 12;
+  // Current-launch ad impressions attributed to this gate. This is consumption:
+  // a rendered ad callback reached the guest with this feature id.
+  uint32 impression_count = 13;
+  // Current-launch successful ad loads for this gate's resolved ad unit. This is
+  // supply/inventory and can exceed impressions when a loaded ad remains ready.
+  uint32 load_success_count = 14;
+  // Current-launch failed ad loads for this gate's resolved ad unit.
+  uint32 load_fail_count = 15;
+}
+
+// Read-only snapshot of the funnel state. Not_configured => ok=false, empty
+// rows. Meant for debug UIs / QA panels only; do not build product logic on
+// this shape — fields may churn.
+message IntrospectResponse {
+  bool ok = 1;
+  string arm_id = 2;
+  string config_revision = 3;
+  string graph_version = 4;
+  repeated IntrospectGate gates = 5;
+  // Every dotted ad_config path → resolved unit_id.
+  map<string, string> slots = 6;
+  // Ad units the guest has heard `ad_load_succeeded` for and hasn't
+  // consumed / expired yet.
+  repeated string ready_units = 7;
+}
+
+// ── TICK ──────────────────────────────────────────────────────────────
+message TickRequest {
+  // Persistence + host metadata; see ConfigureRequest.base.
+  asyncify.types.BaseRequest base = 1;
+  // Maximum number of persisted analytics rows to POST in this call. Hosts may
+  // pass 0 to use the guest default. The remote endpoint currently accepts up to
+  // 100 events per request.
+  uint32 max_events = 2;
+}
+
+message TickResponse {
+  bool ok = 1;
+  // Number of events successfully posted and removed from the local queue.
+  uint32 flushed = 2;
+  // Number of events still persisted locally after this tick.
+  uint32 remaining = 3;
+  // Populated when ok=false and a remote flush was attempted but failed.
+  string error = 4;
+  // Number of queued rows examined by this tick before remote delivery or
+  // deadletter handling. Includes invalid rows that were not sent.
+  uint32 attempted = 5;
+  // Number of queued rows moved to the local deadletter file during this tick.
+  uint32 deadlettered = 6;
+  // Number of rows dropped because the local durable queue exceeded its cap.
+  uint32 dropped = 7;
+  // Stable machine-readable error token, e.g. empty_response or schema_invalid.
+  string error_code = 8;
+}
+
+// ── IAP_CONFIG (RC JSON shape) ───────────────────────────────────────
+// Typed schema for the `iap_config` value in the RC map — the paywall/gates
+// side of the funnel. DOCUMENTATION ONLY: the wire still carries `iap_config`
+// as a JSON string inside `ConfigureRequest.rc`, and the guest still parses
+// it (see `rust/src/task/funnel/config.rs`). These messages exist so hosts
+// and RC authors have a single source of truth for the JSON keys the guest
+// expects — the ad-slot tree (`ad_config`) stays untyped for now.
+//
+// Precedence for RC keys is handled by `ConfigureRequest.suffix` / `region`
+// (see the pick chain there). This message describes the SHAPE of one
+// selected value, not how the value is chosen.
+
+// One entry in `iap_config.feature_gates`. RC values must use the object form:
+// `{ "type": "FEATURE_GATE_INTER", ... }`. Bare string gate tokens are ignored.
+message GateSpec {
+  // Gate kind. Wire values are the `FEATURE_GATE_*` tokens the RC ships;
+  // unknown/missing tokens are treated as GATE_TYPE_OFF.
+  GateType type = 1;
+  // Show every Nth touchpoint (1 = every time). Absent ⇒ unbounded.
+  optional uint32 frequency = 2;
+  // Lifetime hard cap on shows for this gate. Absent ⇒ unbounded. Counter
+  // survives graph_version migrations.
+  optional uint32 limit = 3;
+  // Slot key in `ad_config.slots` resolving to a `unit_id` (e.g. `inter_splash`).
+  // Empty ⇒ guest picks a default per gate type (inter_<fid>, reward_fallback,
+  // native_<fid>, resume_<fid>, banner_<fid>).
+  string slot_ref = 4;
+  // Key into `FunnelIapConfig.pools`. IAP/POPUP gates that omit this fall
+  // through to `FunnelIapConfig.default_pool`; ad gates ignore it.
+  string pool_ref = 5;
+  // Credit cost to open a spend-side gate. Meaningful when the feature is
+  // gated by an in-app currency the user tops up by watching a rewarded ad
+  // (see `reward_credits` below on the paired REWARD gate). Absent ⇒ 0
+  // (free / not credit-gated). Opaque to the guest; the host enforces.
+  optional uint32 credits = 6;
+  // Credits granted to the user's wallet when THIS gate's rewarded ad
+  // plays through to `userDidEarnReward`. Meaningful only on
+  // `FEATURE_GATE_REWARD` gates; ignored on other types. Different REWARD
+  // gates that share the same underlying slot can grant different
+  // amounts. Absent / 0 ⇒ no wallet grant (host still decides whether to
+  // unlock the feature separately). Opaque to the guest; passed through
+  // to the host on `SHOW_REWARDED`.
+  optional uint32 reward_credits = 7;
+  // Maximum time (ms) the host may wait for this gate's ad to become ready
+  // when it would otherwise return `ad_not_ready`. Overrides
+  // `AdGlobalPolicy.fullscreen_ad_wait_ms` for this gate. Absent ⇒ use the
+  // global default; 0 ⇒ do not wait.
+  optional uint32 ad_wait_ms = 8;
+  // Milliseconds after the host-owned view becomes visible before the close
+  // affordance is shown/enabled. Applies to paywall/popup surfaces and
+  // full-screen native ads. 0 ⇒ show close immediately. SDK-owned
+  // interstitial/rewarded close controls ignore it. Absent ⇒ 0.
+  optional uint32 close_delay_ms = 9;
+}
+
+// One entry in `iap_config.pools`. The pool describes a paywall/popup layout
+// as authored in RC; the guest resolves it into a PaywallPlan at OpenGate
+// time by looking up each `sku_refs[]` alias in `FunnelIapConfig.skus`.
+//
+// Display content is deliberately UNTYPED — RC ships `template` as either a
+// bare token string ("two_pack") or an arbitrary nested map ({…}). The
+// guest never parses it, only forwards. Host decides at render time.
+message PaywallPool {
+  // Analytics id for this IAP surface — the token every purchase / show
+  // event carries so the host can slice revenue by paywall variant.
+  string iap_id = 1;
+  // Content id for content-gated flows (e.g. a specific unlockable
+  // template/scene the paywall gates behind purchase). Empty when the
+  // gate is just "premium yes/no".
+  string content_id = 2;
+  // Ordered SKU aliases — each must appear as a key in
+  // `FunnelIapConfig.skus`. Unresolved aliases become PaywallSku entries
+  // with empty `sku_id` so the host can hide them.
+  repeated string sku_refs = 3;
+  // Index into `sku_refs[]` for the default selection. Clamped to
+  // `sku_refs.len()-1` if out of range. Absent ⇒ 0.
+  uint32 default_sku_index = 4;
+  // Paywall template — any JSON value. Two typical shapes:
+  //   • string  — a layout token the host maps to a hard-coded view
+  //               (`"three_price"`, `"two_pack"`, `"one_pack"`, …).
+  //   • struct  — a fully hand-authored payload the host renders directly
+  //               (title/subtitle/badge/nested lists / whatever the RC
+  //               author wants).
+  // Guest treats it as opaque; parsed and displayed only by the host.
+  // Absent (null) ⇒ host default.
+  google.protobuf.Value template = 5;
+}
+
+// Priority hint for backend-authored preload rules. The guest preserves RC
+// order within a priority tier; this value lets a backend optimizer mark rules
+// that should beat generic screen/on-device predictions.
+enum PreloadPriority {
+  PRELOAD_PRIORITY_UNSPECIFIED = 0;
+  PRELOAD_PRIORITY_IMMEDIATE = 1;
+  PRELOAD_PRIORITY_HIGH = 2;
+  PRELOAD_PRIORITY_LOW = 3;
+}
+
+// One backend-authored preload rule inside `iap_config.preload_rules[]`.
+// These are learned off-device from analytics (for example Cloudflare event
+// aggregates) and shipped through RC. On-device learning still ranks fallback
+// candidates; rules are the server prior.
+message PreloadRule {
+  // Match a Firebase/guest event name, e.g. "app_open", "screen_view", or
+  // "paywall_dismissed". Empty means this trigger does not participate.
+  string after_event = 1;
+  // Match the promoted screen name on a `screen_view` event. Empty means this
+  // trigger does not participate.
+  string after_screen = 2;
+  // Match a feature id after a successful OpenGate decision for that gate.
+  // Useful for linear funnels: splash -> intros_2 -> intros_3.
+  string after_gate = 3;
+  // Feature ids to preload when the rule matches. Named `preload` to match the
+  // RC JSON authored by the backend: { "after_gate": "splash", "preload": [...] }.
+  repeated string preload = 4;
+  // Backend priority hint. Absent/UNSPECIFIED behaves like HIGH.
+  PreloadPriority priority = 5;
+}
+
+// ── AD_CONFIG (RC JSON shape) ────────────────────────────────────────
+// Typed schema for the `ad_config` RC value — the ad side of the funnel.
+// Same doc-only stance as `iap_config`: `ConfigureRequest.rc` still carries
+// this as a JSON string; `rust/src/task/funnel/config.rs` parses it. This
+// message documents the JSON shape the guest expects.
+
+// `ad_config.global` — the cross-format policy.
+message AdGlobalPolicy {
+  // Master kill switch. Absent ⇒ true (ads run).
+  bool ads_enabled = 1;
+  // Minimum seconds between full-screen ad shows. Applies to interstitial,
+  // rewarded, and full-screen native gates. Absent ⇒ 15.
+  uint32 fullscreen_min_interval_seconds = 2;
+  // Maximum milliseconds the host may wait when the selected full-screen ad
+  // unit is not ready and no ready fallback is available. GateSpec.ad_wait_ms
+  // overrides this per gate. Absent ⇒ 500.
+  uint32 fullscreen_ad_wait_ms = 3;
+  // Slot keys that must not resolve or preload (for example "inter_splash").
+  // Lets RC disable one placement without removing its slot mapping.
+  repeated string disabled_slots = 4;
+  // Adjusts a full-screen native close affordance's tappable area by this many
+  // logical pixels/points/dp on each edge. Positive values expand; negative
+  // values shrink. Absent ⇒ 0. Hosts should clamp this and apply it only to the
+  // close control, never to ad click targets.
+  int32 fullscreen_close_hit_slop = 6;
+}
+
+// The full `ad_config` RC value. Same doc-only stance as
+// `FunnelIapConfig`: `ConfigureRequest.rc` still carries this as a JSON
+// string; the guest parses it in `rust/src/task/funnel/config.rs`.
+//
+// The slot table is a **single flat `map<string, string>`** whose key is
+// `<prefix>_<name>` and whose value is the ad unit id. The prefix
+// encodes the ad format:
+//   * `inter_*`   → interstitial   (AdType.INTERSTITIAL)
+//   * `reward_*`  → rewarded       (AdType.REWARDED)
+//   * `native_*`  → native         (AdType.NATIVE)
+//   * `resume_*`  → resume (foreground) (AdType.RESUME)
+//   * `banner_*`  → banner         (AdType.BANNER)
+// Empty values are skipped by the guest. Example:
+//   { "inter_splash": "ca-app-pub-…/xxxx",
+//     "reward_intros_3": "ca-app-pub-…/yyyy",
+//     "native_player": "ca-app-pub-…/zzzz",
+//     "resume_splash": "ca-app-pub-…/wwww",
+//     "banner_home": "ca-app-pub-…/aaaa" }
+//
+// Reward wallet grants (`reward_credits`) live on the **gate**, not the
+// slot — see `GateSpec.reward_credits`. Same rewarded slot invoked from
+// different gates can grant different amounts.
+message FunnelAdConfig {
+  // Cross-format policy — cooldown, disabled slots, kill switch.
+  AdGlobalPolicy global = 1;
+  // Slot table. Key = `<prefix>_<name>` (see message-level comment for
+  // the prefix mapping). Value = ad unit id. Empty values are skipped.
+  map<string, string> slots = 2;
+}
+
+// The full `iap_config` RC value. See file header for scope: doc-only —
+// wire still ships JSON.
+message FunnelIapConfig {
+  // Per-feature gate definitions. Key = feature_id (matches OpenGateRequest).
+  map<string, GateSpec> feature_gates = 1;
+  // Paywall/popup layout pools referenced by `GateSpec.pool_ref`.
+  map<string, PaywallPool> pools = 2;
+  // Alias → StoreKit / Play Billing product id (e.g. `"yearly"` →
+  // `"<bundle>.premium.yearly"`). `PaywallPool.sku_refs[]` are resolved
+  // through this map.
+  map<string, string> skus = 3;
+  // Fallback `pool_ref` for IAP/POPUP gates that omit their own. Empty ⇒
+  // no fallback (those gates Skip("pool_missing")).
+  string default_pool = 4;
+  // Cap on preload instructions returned per rpc. Absent in RC ⇒ 2.
+  uint32 max_preloads = 5;
+  // Backend-authored preload rules. The backend computes these from analytics
+  // written to Cloudflare Pipelines and writes the resulting rules to RC; the
+  // guest applies them before on-device fallbacks.
+  repeated PreloadRule preload_rules = 6;
+}
+

@@ -377,6 +377,9 @@ message ProviderInfo {
   // Whether `Plugin::supports_create_model()` is true. Swift filters
   // on this for the create-character picker.
   bool creatable = 3;
+  // Whether `Plugin::supports_create_voice()` is true. Swift filters
+  // on this for the create-voice picker.
+  bool voice_creatable = 4 [json_name="voice_creatable"];
 }
 message ListProvidersResponse {
   repeated ProviderInfo providers = 1;
@@ -466,13 +469,16 @@ message GenerateModelResponse {
 message TtsRequest {
   // text to synthesize
   string input = 1;
-  // voice id, e.g. "alloy", "echo", "shimmer"
+  // voice name query (name-based fuzzy match)
   string voice = 2;
   // backend model id, e.g. "tts-1", "tts-1-hd"
   optional string model = 3;
   // output format: "mp3", "wav", "flac", "opus", "pcm16"
   optional string format = 4;
   asyncify.types.BaseRequest base = 5;
+  // provider-assigned voice UUID (exact match, takes priority over
+  // name query). Empty = fall back to voice name query.
+  optional string voice_id = 6 [json_name="voice_id"];
 }
 message TtsResponse {
   // Direct URL to the synthesized audio when the provider returns one
@@ -487,6 +493,121 @@ message TtsResponse {
   // temp file with the right extension. Empty falls back to "mp3".
   optional string audio_mime = 3 [json_name="audio_mime"];
 }
+
+// Voice ----------------------------------------------------------------
+// Provider-agnostic voice CRUD.
+
+enum VoiceGender {
+  VOICE_GENDER_UNSPECIFIED = 0;
+  VOICE_GENDER_NEUTRAL = 1;
+  VOICE_GENDER_MALE = 2;
+  VOICE_GENDER_FEMALE = 3;
+}
+
+enum VoiceVisibility {
+  VOICE_VISIBILITY_UNSPECIFIED = 0;
+  VOICE_VISIBILITY_PUBLIC = 1;
+  VOICE_VISIBILITY_PRIVATE = 2;
+}
+
+enum VoiceSourceType {
+  VOICE_SOURCE_UNSPECIFIED = 0;
+  // user-uploaded audio sample
+  VOICE_SOURCE_FILE = 1;
+  // provider-generated / cloned
+  VOICE_SOURCE_GENERATED = 2;
+}
+
+// Provider-agnostic voice profile
+message VoiceInfo {
+  // provider-assigned voice id
+  string id = 1;
+  // user-facing display name
+  string name = 2;
+  // short text the provider uses for previewing the voice
+  string preview_text = 3 [json_name="preview_text"];
+  // signed URL to the preview audio clip (mp3); may expire
+  optional string preview_audio_url = 4 [json_name="preview_audio_url"];
+  VoiceGender gender = 5;
+  VoiceVisibility visibility = 6;
+  VoiceSourceType source_type = 7 [json_name="source_type"];
+  // provider-side creator user id
+  string creator_id = 8 [json_name="creator_id"];
+  // unix epoch seconds
+  int64 created_at = 9 [json_name="created_at"];
+  // unix epoch seconds
+  int64 updated_at = 10 [json_name="updated_at"];
+  // ciphered plugin app_id that created this voice
+  string provider_id = 11 [json_name="provider_id"];
+}
+
+// Upload an audio sample to create a custom voice clone.
+message CreateVoiceRequest {
+  // user-facing display name (3–20 chars)
+  string name = 1;
+  // audio file URI (file:// or data:) for voice cloning
+  string audio = 2;
+  // "neutral", "male", "female"
+  optional string gender = 3;
+  // "public", "private"
+  optional string visibility = 4;
+  asyncify.types.BaseRequest base = 5;
+}
+message CreateVoiceResponse {
+  VoiceInfo voice = 1;
+}
+
+// Update voice: change preview text to re-synthesize audio,
+// or rename / change visibility.
+message UpdateVoiceRequest {
+  // provider-assigned voice id
+  string id = 1;
+  optional string name = 2;
+  optional VoiceVisibility visibility = 3;
+  asyncify.types.BaseRequest base = 4;
+  // text for the provider to synthesize as preview audio
+  optional string preview_text = 5 [json_name="preview_text"];
+}
+message UpdateVoiceResponse {
+  VoiceInfo voice = 1;
+}
+
+message GetVoiceRequest {
+  string id = 1;
+  asyncify.types.BaseRequest base = 2;
+  // text for voice-over synthesis preview
+  optional string text = 3;
+}
+message GetVoiceResponse {
+  VoiceInfo voice = 1;
+}
+
+message ListVoicesRequest {
+  // keyword substring filter
+  optional string keyword = 1;
+  // pagination — 0-based offset
+  optional int32 offset = 2;
+  // pagination — page size
+  optional int32 limit = 3;
+  asyncify.types.BaseRequest base = 4;
+}
+message ListVoicesResponse {
+  repeated VoiceInfo voices = 1;
+  // total matching rows before pagination
+  int32 total = 2;
+  // 0-based offset used for this page
+  int32 offset = 3;
+  // page size used for this page
+  int32 limit = 4;
+}
+
+// Delete a voice by its provider-assigned id.
+message DeleteVoiceRequest {
+  // provider-assigned voice id
+  string id = 1;
+  asyncify.types.BaseRequest base = 2;
+}
+message DeleteVoiceResponse {}
 
 // ChatCall -------------------------------------------------------------
 // Wire envelope shared by Chat (streaming) and Completion (non-
@@ -616,4 +737,16 @@ service OpenAIService {
   // Provider-specific auth flow. Only registered for plugins that
   // override Plugin::auth_consumer_fn.
   rpc Auth(AuthRequest) returns (AuthResponse);
+
+  // Voice cloning from audio sample. Only registered for plugins
+  // whose Plugin::supports_create_voice() is true.
+  rpc CreateVoice(CreateVoiceRequest) returns (CreateVoiceResponse);
+
+  // Delete a voice by its provider-assigned id. Only registered for
+  // plugins whose Plugin::supports_delete_voice() is true.
+  rpc DeleteVoice(DeleteVoiceRequest) returns (DeleteVoiceResponse);
+
+  // Voice catalog from /serverless/mobile/voices. Registered once
+  // (not per-plugin) under synthetic provider openai:list_voices.
+  rpc ListVoices(ListVoicesRequest) returns (ListVoicesResponse);
 }
