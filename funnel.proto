@@ -91,6 +91,7 @@ enum FunnelEventName {
   option (asyncify.codegen.gen_arg_string) = true;
   FUNNEL_EVENT_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = ""];
   // Ad lifecycle — fired by the host's AdExecutor bridge.
+  FUNNEL_EVENT_AD_REQUESTED = 5 [(asyncify.codegen.arg_string) = "ad_requested"];
   FUNNEL_EVENT_AD_LOAD_SUCCEEDED = 1 [(asyncify.codegen.arg_string) = "ad_load_succeeded"];
   FUNNEL_EVENT_AD_LOAD_FAILED = 2 [(asyncify.codegen.arg_string) = "ad_load_failed"];
   FUNNEL_EVENT_AD_DISMISSED = 3 [(asyncify.codegen.arg_string) = "ad_dismissed"];
@@ -108,6 +109,9 @@ enum FunnelEventName {
   // paywall_purchased because GA4 only rolls dollars into totalRevenue for
   // this reserved name with reserved value+currency params.
   FUNNEL_EVENT_PURCHASE = 20 [(asyncify.codegen.arg_string) = "purchase"];
+  // Reward callback observed by the host after a rewarded ad actually earned.
+  // Guest maps feature_id -> GateSpec.grant_credits and grants wallet credit.
+  FUNNEL_EVENT_REWARD_EARNED = 21 [(asyncify.codegen.arg_string) = "reward_earned"];
   // Attribution — fired by installAttributionBridge.
   FUNNEL_EVENT_INSTALL_ATTRIBUTION = 30 [(asyncify.codegen.arg_string) = "install_attribution"];
 }
@@ -168,6 +172,12 @@ message ConfigureResponse {
   uint32 slot_count = 4;
   // Populated only when ok=false; previous valid config is retained.
   string error = 5;
+  // Event names the guest acts on for this config: the fixed funnel event set
+  // (transition model + R2 pipeline) plus every distinct `after_event` value
+  // from the parsed preload rules. The host caches this and pre-filters the
+  // Firebase swizzle stream against it, so only events the guest consumes pay
+  // the FFI/serial-gate cost. Empty on failure (host keeps its bootstrap set).
+  repeated string consumed_events = 6;
 }
 
 // ── OPEN_GATE ────────────────────────────────────────────────────────
@@ -208,6 +218,7 @@ message GateInstruction {
     ACTION_SHOW_NATIVE = 6;
     ACTION_SHOW_RESUME = 7;
     ACTION_SHOW_BANNER = 8;
+    ACTION_CREDIT_UNLOCKED = 9;
   }
   Action action = 1;
   // SHOW_PAYWALL / SHOW_POPUP → feature_id whose plan/template the host renders.
@@ -232,11 +243,11 @@ message GateInstruction {
   // SHOW_REWARDED → credits granted on `userDidEarnReward`.
   // SHOW_PAYWALL / SHOW_POPUP → credits granted if the user taps the
   // paywall's companion ad button and (for a rewarded companion) plays it
-  // through to `userDidEarnReward`. Sourced from `GateSpec.reward_credits`
+  // through to `userDidEarnReward`. Sourced from `GateSpec.grant_credits`
   // so the host doesn't re-parse ad_config on grant. Absent / 0 on
   // SHOW_INTERSTITIAL / SHOW_NATIVE / SHOW_RESUME / SHOW_BANNER / SKIP, and
   // on paywalls whose companion is not a rewarded slot.
-  optional uint32 reward_credits = 7;
+  optional uint32 grant_credits = 7;
   // SKIP only: milliseconds the host may wait before proceeding. For
   // `ad_not_ready`, this comes from GateSpec.ad_wait_ms or the global
   // AdGlobalPolicy.fullscreen_ad_wait_ms default. 0 ⇒ do not wait.
@@ -262,6 +273,14 @@ message GateInstruction {
   // companion ad slot on SHOW_PAYWALL / SHOW_POPUP. Empty for SKIP and for
   // paywalls/popups without companion inventory.
   string slot_ref = 12;
+  // Guest-owned wallet snapshot after this instruction. 0 when absent/unused.
+  uint32 wallet_balance = 13;
+  // Credit cost configured on the gate when ACTION_CREDIT_UNLOCKED fires.
+  uint32 credit_cost = 14;
+  // Credits spent by this instruction. Non-zero only on ACTION_CREDIT_UNLOCKED.
+  uint32 wallet_spent = 15;
+  // Wallet mutations lazily applied during this OpenGate (refill/spend).
+  repeated WalletEvent wallet_events = 16;
 }
 
 // A paywall/popup plan the guest hands to the host. Sourced from
@@ -285,6 +304,10 @@ message PaywallPlan {
   // Paywall template — any JSON value. See PaywallPool.template. Absent ⇒
   // host default.
   google.protobuf.Value template = 5;
+  // Optional credits granted when a purchase succeeds for a sku ref in this
+  // pool. Key is a `sku_refs[]` alias, value is the credit amount. The guest
+  // resolves this into PaywallSku.credit_grant and later grants by product_id.
+  map<string, uint32> credit_grants = 7;
   // Key in `iap_config.pools` that produced this plan. Events carry it as
   // `pool_name` so revenue/lift can be sliced by paywall pool/variant.
   string pool_name = 6;
@@ -297,6 +320,29 @@ message PaywallSku {
   // — the id the store bills against. Empty ⇒ skus map lookup failed
   // (host should treat this sku as unavailable).
   string sku_id = 2;
+  // Credits granted when this SKU purchase completes in this paywall pool.
+  // Zero means this SKU buys premium/access only and does not adjust wallet.
+  uint32 credit_grant = 3;
+}
+
+// One wallet mutation derived by the guest from config + observed host events.
+// The host never sends arbitrary balance writes; it reports real events
+// (reward_earned, purchase/paywall success), and the guest maps them through
+// GateSpec.grant_credits, PaywallSku.credit_grant, and RefillRule.
+message WalletEvent {
+  string reason = 1;          // credit_spent, reward_earned, credit_purchased, rrule_refill
+  int64 wallet_delta = 2;
+  uint32 wallet_balance = 3;
+  string feature_id = 4;
+  string slot_ref = 5;
+  string ad_unit_name = 6;
+  string product_id = 7;
+  string transaction_id = 8;
+  string rule_id = 9;
+  string idempotency_key = 10;
+  uint32 credit_cost = 11;
+  uint32 grant_credits = 12;
+  bool duplicate = 13;
 }
 
 // ── LOG_EVENT ────────────────────────────────────────────────────────
@@ -335,14 +381,21 @@ message LogEventRequest {
   // For `paywall_shown` events: the feature_id (gate) whose paywall opened.
   // The guest stores this in its `sessions` map alongside `session_id` so a
   // later `paywall_purchased`/`paywall_dismissed` can correlate back to the
-  // gate that triggered it.
+  // gate that triggered it. Reward callbacks also carry the rewarded feature id.
   string feature_id = 9;
+  // Purchase/wallet-grant metadata promoted from params so the guest can apply
+  // config-derived credit grants without parsing arbitrary Firebase payloads.
+  string product_id = 10;
+  string transaction_id = 11;
+  string slot_ref = 12;
 }
 
 message LogEventResponse {
   bool ok = 1;
   // Newly-predicted units to preload (empty when prediction unchanged).
   repeated PreloadInstruction preload = 2;
+  // Wallet grants caused by event-driven callbacks such as reward_earned/purchase.
+  repeated WalletEvent wallet_events = 3;
 }
 
 // Paywall/popup lifecycle rides LogEvent, NOT dedicated rpcs. The host fires
@@ -390,7 +443,7 @@ message IntrospectGate {
   optional uint32 credits = 10;
   // Credits granted when this gate's rewarded ad completes. Absent means this
   // gate does not grant credits.
-  optional uint32 reward_credits = 11;
+  optional uint32 grant_credits = 11;
   // Current-launch ad show instructions emitted by the guest for this gate. This
   // is demand: the host was asked to present a loaded ad. It does not prove the
   // ad SDK rendered an impression.
@@ -419,6 +472,8 @@ message IntrospectResponse {
   // Ad units the guest has heard `ad_load_succeeded` for and hasn't
   // consumed / expired yet.
   repeated string ready_units = 7;
+  // Guest-owned wallet balance, after persisted state load.
+  uint32 wallet_balance = 8;
 }
 
 // ── TICK ──────────────────────────────────────────────────────────────
@@ -448,6 +503,10 @@ message TickResponse {
   uint32 dropped = 7;
   // Stable machine-readable error token, e.g. empty_response or schema_invalid.
   string error_code = 8;
+  // Wallet refills applied during this maintenance tick.
+  repeated WalletEvent wallet_events = 9;
+  // Guest-owned wallet balance after refill evaluation.
+  uint32 wallet_balance = 10;
 }
 
 // ── IAP_CONFIG (RC JSON shape) ───────────────────────────────────────
@@ -482,17 +541,17 @@ message GateSpec {
   string pool_ref = 5;
   // Credit cost to open a spend-side gate. Meaningful when the feature is
   // gated by an in-app currency the user tops up by watching a rewarded ad
-  // (see `reward_credits` below on the paired REWARD gate). Absent ⇒ 0
-  // (free / not credit-gated). Opaque to the guest; the host enforces.
+  // (see `grant_credits` below on the paired REWARD gate). Absent ⇒ 0
+  // (free / not credit-gated). The guest owns the balance and spends credits
+  // inside OpenGate when enough balance is available.
   optional uint32 credits = 6;
   // Credits granted to the user's wallet when THIS gate's rewarded ad
   // plays through to `userDidEarnReward`. Meaningful only on
   // `FEATURE_GATE_REWARD` gates; ignored on other types. Different REWARD
   // gates that share the same underlying slot can grant different
-  // amounts. Absent / 0 ⇒ no wallet grant (host still decides whether to
-  // unlock the feature separately). Opaque to the guest; passed through
-  // to the host on `SHOW_REWARDED`.
-  optional uint32 reward_credits = 7;
+  // amounts. Absent / 0 ⇒ no wallet grant. The guest grants this only after
+  // the host reports a real reward_earned callback for this feature.
+  optional uint32 grant_credits = 7;
   // Maximum time (ms) the host may wait for this gate's ad to become ready
   // when it would otherwise return `ad_not_ready`. Overrides
   // `AdGlobalPolicy.fullscreen_ad_wait_ms` for this gate. Absent ⇒ use the
@@ -569,6 +628,21 @@ message PreloadRule {
   PreloadPriority priority = 5;
 }
 
+// Guest-owned wallet refill policy. The wasm guest evaluates these rules
+// lazily on Configure/OpenGate/LogEvent/Tick. Rules are global, not feature-scoped.
+message RefillRule {
+  // Stable rule id for guest idempotency, e.g. "daily_free_credits".
+  string id = 1;
+  // RFC 5545 recurrence rule without DTSTART, e.g. "FREQ=DAILY;INTERVAL=1".
+  // The guest chooses a persisted wallet anchor time and records the last applied occurrence.
+  string rrule = 2;
+  // Credits to add at each eligible recurrence.
+  uint32 credits = 3;
+  // Optional balance cap. If non-zero, the guest does not apply this refill
+  // while the current balance is already >= max_balance.
+  uint32 max_balance = 4;
+}
+
 // ── AD_CONFIG (RC JSON shape) ────────────────────────────────────────
 // Typed schema for the `ad_config` RC value — the ad side of the funnel.
 // Same doc-only stance as `iap_config`: `ConfigureRequest.rc` still carries
@@ -615,8 +689,8 @@ message AdGlobalPolicy {
 //     "resume_splash": "ca-app-pub-…/wwww",
 //     "banner_home": "ca-app-pub-…/aaaa" }
 //
-// Reward wallet grants (`reward_credits`) live on the **gate**, not the
-// slot — see `GateSpec.reward_credits`. Same rewarded slot invoked from
+// Reward wallet grants (`grant_credits`) live on the **gate**, not the
+// slot — see `GateSpec.grant_credits`. Same rewarded slot invoked from
 // different gates can grant different amounts.
 message FunnelAdConfig {
   // Cross-format policy — cooldown, disabled slots, kill switch.
@@ -646,5 +720,8 @@ message FunnelIapConfig {
   // written to Cloudflare Pipelines and writes the resulting rules to RC; the
   // guest applies them before on-device fallbacks.
   repeated PreloadRule preload_rules = 6;
+  // Guest-owned wallet refill rules. The guest applies them lazily and
+  // idempotently; the host does not parse RRULE or own the balance.
+  repeated RefillRule refill_rules = 7;
 }
 

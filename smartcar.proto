@@ -1,0 +1,478 @@
+syntax = "proto3";
+
+import "codegen.proto";
+import "google/protobuf/struct.proto";
+
+package asyncify.smartcar;
+
+option swift_prefix = "Smartcar";
+
+// Wire types for the connected-car ("smartcar") domain. The wasm
+// smartcar module proxies every request to the vehicle backend and
+// hands the JSON responses back to the app.
+//
+// Auth model: the app completes a provider-hosted Connect flow in native code.
+// Native code owns only the WebView shell; the guest observes hosted page
+// URLs/body text, detects provider-specific completion, caches the resulting
+// credential, and injects it into every subsequent read/control request.
+//
+// The proto is provider-agnostic: it models the shape of the calls,
+// not any one backend. Two read families exist because the backend
+// splits its own routes that way — a universal set that works for any
+// connected vehicle, and a vendor-scoped set (path prefix `tesla`)
+// that only applies to vehicles from one OEM. Callers pick the family
+// the connected vehicle supports.
+//
+// Read responses are modeled after the Smartcar API reference's
+// normalized schema (the full superset). The default backend returns a
+// SUBSET of those fields, so every telemetry field is `optional` and the
+// guest populates only what a given endpoint reports — unset ≠ zero.
+// Control responses stay minimal (the echoed action) since the backend
+// only echoes what it applied.
+
+// ---------------------------------------------------------------------
+// Control action enums. Serialized on the wire as the uppercase token
+// the backend expects (`START`, `STOP`, `SET`, `OPEN`, `CLOSE`). The
+// mechanical strip-prefix rule maps e.g. `CHARGE_ACTION_START -> START`
+// and the `*_UNSPECIFIED` zero value to "".
+// ---------------------------------------------------------------------
+
+// Charge session toggle. Despite the endpoint name it is a binary
+// start/stop of charging, not a numeric limit.
+enum ChargeAction {
+  option (asyncify.codegen.gen_arg_string) = true;
+  CHARGE_ACTION_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = ""];
+  CHARGE_ACTION_START = 1 [(asyncify.codegen.arg_string) = "START"];
+  CHARGE_ACTION_STOP = 2 [(asyncify.codegen.arg_string) = "STOP"];
+}
+
+// Cabin climate (HVAC) command. `START`/`STOP` turn conditioning on/off;
+// `SET` applies the accompanying `temperature_celsius` target.
+enum ClimateAction {
+  option (asyncify.codegen.gen_arg_string) = true;
+  CLIMATE_ACTION_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = ""];
+  CLIMATE_ACTION_START = 1 [(asyncify.codegen.arg_string) = "START"];
+  CLIMATE_ACTION_STOP = 2 [(asyncify.codegen.arg_string) = "STOP"];
+  CLIMATE_ACTION_SET = 3 [(asyncify.codegen.arg_string) = "SET"];
+}
+
+// Front defroster command — open (on) or close (off).
+enum DefrosterAction {
+  option (asyncify.codegen.gen_arg_string) = true;
+  DEFROSTER_ACTION_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = ""];
+  DEFROSTER_ACTION_OPEN = 1 [(asyncify.codegen.arg_string) = "OPEN"];
+  DEFROSTER_ACTION_CLOSE = 2 [(asyncify.codegen.arg_string) = "CLOSE"];
+}
+
+// Steering-wheel heater toggle — binary on/off (no level).
+enum HeaterAction {
+  option (asyncify.codegen.gen_arg_string) = true;
+  HEATER_ACTION_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = ""];
+  HEATER_ACTION_START = 1 [(asyncify.codegen.arg_string) = "START"];
+  HEATER_ACTION_STOP = 2 [(asyncify.codegen.arg_string) = "STOP"];
+}
+
+// Lock or unlock the vehicle.
+enum SecurityAction {
+  option (asyncify.codegen.gen_arg_string) = true;
+  SECURITY_ACTION_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = ""];
+  SECURITY_ACTION_LOCK = 1 [(asyncify.codegen.arg_string) = "LOCK"];
+  SECURITY_ACTION_UNLOCK = 2 [(asyncify.codegen.arg_string) = "UNLOCK"];
+}
+
+// ---------------------------------------------------------------------
+// Connect (OAuth) configuration.
+// ---------------------------------------------------------------------
+
+// Smartcar Connect launch mode. `LIVE` hits real OEM auth; `TEST` uses
+// Smartcar's test credentials; `SIMULATED` uses a simulated vehicle. The
+// guest chooses the mode per build/provider so the app doesn't decide.
+enum ConnectMode {
+  option (asyncify.codegen.gen_arg_string) = true;
+  CONNECT_MODE_UNSPECIFIED = 0 [(asyncify.codegen.arg_string) = ""];
+  CONNECT_MODE_LIVE = 1 [(asyncify.codegen.arg_string) = "live"];
+  CONNECT_MODE_TEST = 2 [(asyncify.codegen.arg_string) = "test"];
+  CONNECT_MODE_SIMULATED = 3 [(asyncify.codegen.arg_string) = "simulated"];
+}
+
+// Request for `ConnectConfig`. The caller passes the mode it wants to
+// run Connect in (an app/build concern — test vs live); the guest
+// returns the matching credentials and the effective mode.
+message ConnectConfigRequest {
+  // Desired launch mode. `UNSPECIFIED` lets the guest pick its default.
+  ConnectMode mode = 1;
+}
+
+// OAuth Connect parameters the native app needs to launch the Connect
+// flow. Owned by the guest (per provider) so the app never hardcodes a
+// backend's client identity or scope surface; the app reads these and
+// opens `connect_url` in a WebView.
+message ConnectConfigResponse {
+  // Smartcar application/client id used to launch Connect. Informational
+  // — already baked into `connect_url`.
+  string application_id = 1;
+  // Redirect URI registered for the provider's Smartcar app (a custom
+  // scheme like `sc<application_id>://exchange`). The app opens
+  // `connect_url` in a web view and intercepts navigation to this URI's
+  // scheme to capture the `code`. Smartcar only accepts a redirect whose
+  // scheme is registered for the app, so this is NOT rewritten.
+  string redirect_uri = 2;
+  // Full permission surface requested. Informational — already baked
+  // into `connect_url`.
+  repeated string scope = 3;
+  // Effective launch mode (already reflected in `connect_url`).
+  ConnectMode mode = 4;
+  // Fully-built Smartcar Connect authorize URL to load in a web view.
+  string connect_url = 5;
+}
+
+// ---------------------------------------------------------------------
+// Hosted Connect WebView completion.
+// ---------------------------------------------------------------------
+
+// Guest decision for one native WebView observation. The app owns only the
+// WebView shell; provider-specific terminal URLs/body parsing live in the
+// guest.
+enum HostedConnectAction {
+  HOSTED_CONNECT_ACTION_CONTINUE = 0;
+  HOSTED_CONNECT_ACTION_CANCEL = 1;
+  HOSTED_CONNECT_ACTION_COMPLETE = 2;
+  HOSTED_CONNECT_ACTION_ERROR = 3;
+}
+
+// One observation from the native hosted-Connect WebView.
+message HostedConnectEventRequest {
+  // Current frame URL, if any.
+  string url = 1;
+  // Main-frame body text, if available after navigation completes or from a
+  // JavaScript bridge message.
+  string body_text = 2;
+}
+
+// Decision returned by the guest after parsing a hosted-Connect observation.
+message HostedConnectEventResponse {
+  // What the native WebView should do next.
+  HostedConnectAction action = 1;
+  // Provider credential cached by the guest on success. It is still named
+  // `user_id` to match the existing provider-agnostic Smartcar credential
+  // surface used by read/control calls.
+  string user_id = 2;
+  // Human-readable error when `action == ERROR`.
+  string error = 3;
+}
+
+// ---------------------------------------------------------------------
+// Cached connected accounts.
+// ---------------------------------------------------------------------
+
+// Request for cached Smartcar accounts for the provider. The guest reads
+// its local session cache only; no network call is made.
+message AccountsRequest {}
+
+// Select one cached account as active. Reads/controls use the first cached
+// account, so switching means moving this `user_id` to the front of the local
+// cache array.
+message SwitchAccountRequest {
+  string user_id = 1;
+}
+
+// One locally cached connected account. `user_id` is the provider credential
+// surface name retained for compatibility; for Mustname it is the Smartcar
+// access token captured from hosted Connect.
+message Account {
+  string user_id = 1;
+  string label = 2;
+}
+
+// Locally cached accounts for this provider. The first account is the active
+// account used by reads/controls.
+message AccountList {
+  repeated Account accounts = 1;
+}
+
+// ---------------------------------------------------------------------
+// Vehicle list.
+// ---------------------------------------------------------------------
+
+// One connected vehicle from the account's garage.
+message Vehicle {
+  // Stable per-vehicle identifier used as `vehicle_id` in read/control
+  // requests.
+  string vehicle_id = 1;
+  // Manufacturer/brand string as reported by the backend (e.g.
+  // `"Tesla"`, `"Ford"`, or a demo label). May drive which read family
+  // the app uses.
+  string make = 2;
+  // Model name as reported by the backend. May be empty.
+  string model = 3;
+  // Model year as reported by the backend. May be empty.
+  string year = 4;
+  // Any additional per-vehicle fields the backend returns, forwarded
+  // verbatim without a fixed schema.
+  google.protobuf.Struct extra = 5;
+}
+
+// Response of the "list all vehicles" call.
+message VehicleList {
+  // Every vehicle connected to the account. Empty when the account has
+  // completed auth but connected no vehicles.
+  repeated Vehicle vehicles = 1;
+}
+
+// ---------------------------------------------------------------------
+// Reads (universal + vendor-scoped). All reads share one request that
+// selects the vehicle; the specific datum is chosen by the rpc.
+// ---------------------------------------------------------------------
+
+// Selects which connected vehicle a read/control targets. The
+// authorizing `user_id` is NOT on the wire here — the guest injects its
+// cached value.
+message ReadRequest {
+  // Target vehicle. Take this from `VehicleList.vehicles[].vehicle_id`.
+  // Empty selects the account's currently-active vehicle backend-side.
+  string vehicle_id = 1;
+}
+
+// One closure's open/close state, mirroring the Smartcar lock-status
+// standard's `{type, status}` objects (used for doors, windows, sunroof,
+// storage, and charging port).
+message ClosureStatus {
+  // Closure location label as reported (e.g. `"frontLeft"`, `"rear"`).
+  string type = 1;
+  // Closure state as reported: typically `"OPEN"`, `"CLOSED"`, or
+  // `"UNKNOWN"` (supported but no valid value).
+  string status = 2;
+}
+
+// One typed message per read, modeled on the Smartcar API reference's
+// normalized per-endpoint schema (the full superset). The default
+// backend returns a SUBSET of these fields, so every field is `optional`
+// / `repeated` and the guest populates only what the backend actually
+// reports — "unset" is distinguishable from a real zero. Units follow
+// the Smartcar standard: distances in kilometers, pressures in
+// kilopascals, capacity in kWh, and fractions as decimals in [0, 1]
+// (e.g. 0.3 == 30%), NOT 0–100.
+
+// `Odometer` / `TeslaVehicleAttributes` read.
+message Odometer {
+  // Total distance traveled, in kilometers. Source: `distance`.
+  optional double distance_km = 1;
+}
+
+// EV battery level. `BatteryLevel` (universal) and `TeslaBatteryStatus`
+// (vendor-scoped) both map here.
+message BatteryLevel {
+  // State of charge as a fraction in [0, 1]. Source: `percentRemaining`.
+  optional double percent_remaining = 1;
+  // Estimated remaining driving range, in kilometers. Source: `range`.
+  optional double range_km = 2;
+}
+
+// EV charge target. `ChargeLimit` read.
+message ChargeLimit {
+  // Configured charge target as a fraction in [0, 1] (0.8 == 80%).
+  // Source: `limit`.
+  optional double limit = 1;
+}
+
+// EV charge status. `TeslaChargeStatus` read.
+message ChargeStatus {
+  // Whether a charging cable is currently plugged in.
+  // Source: `isPluggedIn`.
+  optional bool is_plugged_in = 1;
+  // Charging state label: `CHARGING`, `FULLY_CHARGED`, `NOT_CHARGING`.
+  // Source: `state`.
+  optional string state = 2;
+}
+
+// EV rated battery capacity. `NominalCapacity` read.
+message NominalCapacity {
+  // Rated (nominal) battery capacity, in kilowatt-hours.
+  // Source: `capacity`.
+  optional double capacity_kwh = 1;
+}
+
+// Tire pressures, in kilopascals, by corner. `TiresPressure` read.
+// Sources: `frontLeft`, `frontRight`, `backLeft`, `backRight`.
+message TirePressure {
+  optional double front_left_kpa = 1;
+  optional double front_right_kpa = 2;
+  optional double back_left_kpa = 3;
+  optional double back_right_kpa = 4;
+}
+
+// Lock status. `LockStatus` read. Mirrors the Smartcar standard's
+// structured closure arrays; the default backend may report only the
+// overall `is_locked` flag, leaving the arrays empty.
+message LockStatus {
+  // Whether the vehicle is locked overall. Source: `isLocked`.
+  optional bool is_locked = 1;
+  repeated ClosureStatus doors = 2;
+  repeated ClosureStatus windows = 3;
+  repeated ClosureStatus sunroof = 4;
+  repeated ClosureStatus storage = 5;
+  repeated ClosureStatus charging_port = 6;
+}
+
+// Engine oil life. `OilLive` read.
+message EngineOil {
+  // Remaining engine-oil life as a fraction in [0, 1] (1 == fresh,
+  // 0 == change now; ICE/hybrid only). Source: `lifeRemaining`.
+  optional double life_remaining = 1;
+}
+
+// Granted scopes/permissions. `Permissions` read.
+message Permissions {
+  // Scopes the backend reports as granted for this vehicle.
+  repeated string permissions = 1;
+}
+
+// A single temperature reading, in degrees Celsius. Used by the
+// vendor-scoped `TeslaInteriorTemperature` / `TeslaExteriorTemperature`
+// reads. Vendor-scoped shape (no public standard); populated
+// best-effort.
+message Temperature {
+  optional double celsius = 1;
+}
+
+// Cabin climate (HVAC) state. `TeslaGetCabinClimate` read. Vendor-scoped
+// shape; populated best-effort.
+message CabinClimate {
+  // Whether cabin climate is currently on.
+  optional bool on = 1;
+  // Current target temperature, in degrees Celsius.
+  optional double temperature_celsius = 2;
+}
+
+// A vendor-scoped on/off accessory state. Used by `TeslaGetDefroster`
+// and `TeslaGetSteeringWheel`. Vendor-scoped shape; populated
+// best-effort.
+message ToggleState {
+  // Whether the accessory (defroster / steering-wheel heater) is on.
+  optional bool on = 1;
+}
+
+// Free-form vehicle status. `TeslaVehicleStatus` read. Vendor-scoped;
+// passed through as reported.
+message VehicleStatus {
+  // Status label as reported by the backend.
+  optional string status = 1;
+}
+
+// ---------------------------------------------------------------------
+// Controls (state-changing).
+// ---------------------------------------------------------------------
+
+// Start/stop the charge session for a vehicle.
+message ChargeControlRequest {
+  // Target vehicle (see `ReadRequest.vehicle_id`).
+  string vehicle_id = 1;
+  // Charging toggle to apply.
+  ChargeAction action = 2;
+}
+
+// Set or toggle cabin climate (HVAC).
+message CabinClimateRequest {
+  // Target vehicle.
+  string vehicle_id = 1;
+  // Climate command. When `SET`, `temperature_celsius` is applied.
+  ClimateAction action = 2;
+  // Target cabin temperature in degrees Celsius. Used only when
+  // `action == SET`; ignored otherwise.
+  double temperature_celsius = 3;
+}
+
+// Open/close the front defroster.
+message DefrosterRequest {
+  // Target vehicle.
+  string vehicle_id = 1;
+  // Defroster command to apply.
+  DefrosterAction action = 2;
+}
+
+// Toggle the steering-wheel heater.
+message SteeringWheelRequest {
+  // Target vehicle.
+  string vehicle_id = 1;
+  // Heater toggle to apply.
+  HeaterAction action = 2;
+}
+
+// Lock or unlock the vehicle.
+message SecurityRequest {
+  // Target vehicle.
+  string vehicle_id = 1;
+  // Security command to apply.
+  SecurityAction action = 2;
+}
+
+// Result of a control command. The backend echoes the resulting
+// `action`, which the app can compare against the requested one to
+// confirm the transition.
+message ControlResponse {
+  // Action the backend reports after applying the command (e.g.
+  // `"START"`, `"SET"`).
+  string action = 1;
+  // Any additional fields the backend returned alongside `action`,
+  // forwarded verbatim.
+  google.protobuf.Struct data = 2;
+}
+
+// ---------------------------------------------------------------------
+// Service. One rpc per backend endpoint. Every read takes `ReadRequest`
+// (the guest injects the authorizing `user_id`) and returns its own
+// typed message. `Tesla*` rpcs are the vendor-scoped read family.
+// ---------------------------------------------------------------------
+
+service SmartcarService {
+  // Fetch the provider's OAuth Connect configuration (application id,
+  // redirect uri, scopes) so the app can launch Connect without
+  // hardcoding any backend identity.
+  rpc ConnectConfig(ConnectConfigRequest) returns (ConnectConfigResponse);
+
+  // Let the guest parse a hosted Connect WebView URL/body observation and
+  // cache credentials when the provider-specific terminal token payload is
+  // seen.
+  rpc HostedConnectEvent(HostedConnectEventRequest) returns (HostedConnectEventResponse);
+
+  // Return locally cached connected accounts for this provider. The first
+  // account is the one reads/controls use.
+  rpc Accounts(AccountsRequest) returns (AccountList);
+
+  // Move one cached account to the front of the local cache so reads/controls
+  // use it, then return the updated account ordering.
+  rpc SwitchAccount(SwitchAccountRequest) returns (AccountList);
+
+  // List every vehicle in the account's garage.
+  rpc AllVehicles(ReadRequest) returns (VehicleList);
+
+  // Universal reads — apply to any connected vehicle. `Get*` verb form
+  // keeps the rpc name distinct from its return message (rpc `Odometer`
+  // and message `Odometer` in the same service would otherwise collide).
+  rpc GetOdometer(ReadRequest) returns (Odometer);
+  rpc GetBatteryLevel(ReadRequest) returns (BatteryLevel);
+  rpc GetChargeLimit(ReadRequest) returns (ChargeLimit);
+  rpc GetNominalCapacity(ReadRequest) returns (NominalCapacity);
+  rpc GetLockStatus(ReadRequest) returns (LockStatus);
+  rpc GetTiresPressure(ReadRequest) returns (TirePressure);
+  rpc GetOilLife(ReadRequest) returns (EngineOil);
+  rpc GetPermissions(ReadRequest) returns (Permissions);
+
+  // Vendor-scoped reads (backend path prefix `tesla`).
+  rpc TeslaVehicleStatus(ReadRequest) returns (VehicleStatus);
+  rpc TeslaVehicleAttributes(ReadRequest) returns (Vehicle);
+  rpc TeslaBatteryStatus(ReadRequest) returns (BatteryLevel);
+  rpc TeslaChargeStatus(ReadRequest) returns (ChargeStatus);
+  rpc TeslaInteriorTemperature(ReadRequest) returns (Temperature);
+  rpc TeslaExteriorTemperature(ReadRequest) returns (Temperature);
+  rpc TeslaGetCabinClimate(ReadRequest) returns (CabinClimate);
+  rpc TeslaGetDefroster(ReadRequest) returns (ToggleState);
+  rpc TeslaGetSteeringWheel(ReadRequest) returns (ToggleState);
+
+  // Controls (state-changing).
+  rpc SetChargeLimit(ChargeControlRequest) returns (ControlResponse);
+  rpc SetCabinClimate(CabinClimateRequest) returns (ControlResponse);
+  rpc SetDefroster(DefrosterRequest) returns (ControlResponse);
+  rpc SetSteeringWheel(SteeringWheelRequest) returns (ControlResponse);
+  rpc SetSecurity(SecurityRequest) returns (ControlResponse);
+}
