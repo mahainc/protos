@@ -176,6 +176,12 @@ message SwitchAccountRequest {
   string user_id = 1;
 }
 
+// Remove one cached account from the local Smartcar session cache. If the
+// deleted account is active, the next cached account becomes active.
+message DeleteAccountRequest {
+  string user_id = 1;
+}
+
 // One locally cached connected account. `user_id` is the provider credential
 // surface name retained for compatibility; for Mustname it is the Smartcar
 // access token captured from hosted Connect.
@@ -231,6 +237,10 @@ message ReadRequest {
   // Target vehicle. Take this from `VehicleList.vehicles[].vehicle_id`.
   // Empty selects the account's currently-active vehicle backend-side.
   string vehicle_id = 1;
+  // Vehicle make for brand-specific reads (for example Smartcar's
+  // `{make}/speedometer` endpoint). Use the selected `Vehicle.make` when
+  // available; the guest/provider normalizes casing for its backend.
+  string make = 2;
 }
 
 // One closure's open/close state, mirroring the Smartcar lock-status
@@ -333,6 +343,13 @@ message Permissions {
 // best-effort.
 message Temperature {
   optional double celsius = 1;
+}
+
+// Current vehicle speed. `Speedometer` maps Smartcar's brand-specific
+// `{make}/speedometer` read. With Smartcar's default metric unit system,
+// source `speed` is kilometers per hour.
+message Speedometer {
+  optional double speed_kph = 1;
 }
 
 // Cabin climate (HVAC) state. `TeslaGetCabinClimate` read. Vendor-scoped
@@ -443,6 +460,10 @@ service SmartcarService {
   // use it, then return the updated account ordering.
   rpc SwitchAccount(SwitchAccountRequest) returns (AccountList);
 
+  // Remove one cached account from the local cache, then return the updated
+  // account ordering.
+  rpc DeleteAccount(DeleteAccountRequest) returns (AccountList);
+
   // List every vehicle in the account's garage.
   rpc AllVehicles(ReadRequest) returns (VehicleList);
 
@@ -457,6 +478,7 @@ service SmartcarService {
   rpc GetTiresPressure(ReadRequest) returns (TirePressure);
   rpc GetOilLife(ReadRequest) returns (EngineOil);
   rpc GetPermissions(ReadRequest) returns (Permissions);
+  rpc GetSpeedometer(ReadRequest) returns (Speedometer);
 
   // Vendor-scoped reads (backend path prefix `tesla`).
   rpc TeslaVehicleStatus(ReadRequest) returns (VehicleStatus);
