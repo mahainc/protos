@@ -1,0 +1,426 @@
+syntax = "proto3";
+
+package asyncify.plant;
+
+option swift_prefix = "Plant";
+
+// =====================================================================
+// Plant text-catalog search — the CMS search service behind the
+// PictureThis-family plant database (host cms-search-service.…, base
+// path /api/v2/cmssearch). Distinct from the image-recognition flow in
+// `vision.proto` (VisionService.Scan): this is a name/latin text lookup
+// against the species catalog, not an image classifier.
+//
+// All three endpoints are signed GETs whose responses arrive as an
+// AES-256-ECB + gzip envelope. The guest handles signing, decryption,
+// inflation, and the per-endpoint shape quirks (camelCase vs snake_case
+// rows, and the popular list's doubly-encoded JSON string) — RPC callers
+// see the normalized messages below.
+// =====================================================================
+
+// One catalog species row. Normalized across the three endpoints, which
+// return the same species under different key casings (`latinName` vs
+// `latin_name`, etc.). `rank` is the catalog's relevance/importance score
+// (lower = more prominent); `weight` is only populated by PopularList.
+message PlantSpecies {
+  // stable catalog id for the species
+  string uid = 1;
+  // botanical (Latin) name, e.g. "Rosa"
+  optional string latin_name = 2 [json_name="latin_name"];
+  // localized common names, e.g. ["Rose", "Roses"]
+  repeated string common_names = 3 [json_name="common_names"];
+  // alternative / historical names the species is also indexed under
+  repeated string synonyms = 4;
+  // CDN URL of the species' primary image
+  optional string main_image_url = 5 [json_name="main_image_url"];
+  // catalog relevance rank (lower = more prominent)
+  optional int32 rank = 6;
+  // popularity weight — populated by PopularList only, 0 elsewhere
+  optional int32 weight = 7;
+}
+
+// Full catalog search (cms_search): free-text query → ranked species.
+message SearchRequest {
+  // user's search text, e.g. "rose"
+  string search_text = 1 [json_name="searchText"];
+  // catalog language selector (numeric code as string; default "0")
+  optional string language_code = 2 [json_name="languageCode"];
+  // ISO country code (default "US")
+  optional string country_code = 3 [json_name="countryCode"];
+}
+
+message SearchResult {
+  // ranked matches (camelCase `indexModels` rows on the wire)
+  repeated PlantSpecies species = 1;
+}
+
+// Type-ahead completion (cms_search_support_complete): partial fragment →
+// completion suggestions. Returns empty for very short fragments.
+message CompleteRequest {
+  // partial search fragment, e.g. "ros"
+  string search_text = 1 [json_name="searchText"];
+  // catalog language selector (numeric code as string; default "0")
+  optional string language_code = 2 [json_name="languageCode"];
+  // ISO country code (default "US")
+  optional string country_code = 3 [json_name="countryCode"];
+}
+
+message CompleteResult {
+  // suggestion rows (`models` on the wire; empty for short fragments)
+  repeated PlantSpecies suggestions = 1;
+}
+
+// Popular / empty-box list (cms_popular_list): the species shown before
+// the user types anything. The wire response nests the full list as a
+// JSON string under `map["search"]`; the guest parses it a second time
+// and normalizes the snake_case rows.
+message PopularListRequest {
+  // list entrance key (e.g. "search"); default "search"
+  optional string entrance = 1 [json_name="popularEntrance"];
+  // catalog language selector (numeric code as string; default "0")
+  optional string language_code = 2 [json_name="languageCode"];
+  // ISO country code (default "US")
+  optional string country_code = 3 [json_name="countryCode"];
+}
+
+message PopularListResult {
+  // the popular species list, ordered by the catalog's weight
+  repeated PlantSpecies species = 1;
+}
+
+// =====================================================================
+// Plant-domain follow-up RPCs — care advice after a plant has been
+// identified via Scan (category="plant"). Each request typically carries
+// a plant_id resolved by a prior Scan; the image is optional context.
+// =====================================================================
+
+message WaterCalcRequest {
+  // image of the plant (file:// or https://); optional when plant_id is set
+  optional string file = 1;
+  // previously-resolved plant id (from a prior Scan); provider-agnostic string
+  optional string plant_id = 2;
+  // pot / placement / light / soil settings as provider-specific JSON;
+  // omit for "I don't know" — provider picks a sensible default
+  optional string settings = 3;
+  // ISO country code (default "US")
+  optional string country_code = 4;
+  // user latitude (WGS84) — climate-aware care recommendation; optional
+  optional double latitude = 5;
+  // user longitude (WGS84) — climate-aware care recommendation; optional
+  optional double longitude = 6;
+}
+
+message WaterCalcResult {
+  // recommended water amount per watering, in millilitres
+  optional double water_amount_ml = 1;
+  // watering cadence, in days between waterings
+  optional int32 frequency_days = 2;
+  // care category (e.g. "low_water", "moderate", "high_water", "seasonal")
+  optional string care_type = 3;
+  // identified plant common name (echo from provider)
+  optional string plant_name = 4;
+  // identified plant latin name (echo from provider)
+  optional string latin_name = 5;
+  // plant id echoed for chaining follow-up calls; provider-agnostic string
+  optional string plant_id = 6;
+  // raw JSON response (provider-specific extras: FAQ blocks, etc.)
+  optional string raw = 7;
+}
+
+message RepottingCheckerRequest {
+  // image of the plant (must show both plant and pot)
+  string file = 1;
+  // previously-resolved plant id; optional, provider-agnostic string
+  optional string plant_id = 2;
+  // user-visible name of the plant. When set, the provider substitutes
+  // it for the CMS placeholder (e.g. `__YOUR_PLANT_NAME__`) in returned
+  // markdown guidance so the user sees their plant's name inline.
+  optional string plant_name = 3;
+}
+
+message RepottingCheckerResult {
+  // true when the image shows a recognised plant
+  bool is_plant = 1;
+  // true when the species is one repotting advice applies to
+  // (false for outdoor / ground species)
+  bool is_repottable = 2;
+  // status hint (e.g. "no_pot_detected") when the engine couldn't analyse
+  // the photo; empty when topics[] is populated
+  optional string status = 3;
+  // structured repotting guidance — one entry per topic (preparation,
+  // tools, post-care, etc.). Each section is a titled markdown blurb.
+  repeated RepotTopic topics = 4;
+  // raw JSON response (provider-specific extras)
+  optional string raw = 5;
+}
+
+message RepotTopic {
+  // human-readable topic name (e.g. "Preparation", "Tools", "Aftercare")
+  string name = 1;
+  // titled markdown sections inside the topic
+  repeated RepotTopicSection sections = 2;
+}
+
+message RepotTopicSection {
+  // section heading (e.g. "How to repot")
+  optional string title = 1;
+  // markdown body content
+  string content = 2;
+}
+
+message LightMeterRequest {
+  // captured camera brightness (provider-defined units, e.g. AVFoundation
+  // exposure-based lux estimate); set when measured on-device
+  optional double brightness = 1;
+  // optional image to classify when brightness isn't available
+  optional string file = 2;
+}
+
+message LightMeterResult {
+  // bucket label (e.g. "low_light", "medium_light", "bright_light")
+  string level = 1;
+  // estimated lux value
+  optional double lux = 2;
+}
+
+// Disease detection details for one diagnosed disease on a plant.
+message DiseaseInfo {
+  // common name e.g. "Brown Spot"
+  optional string name = 1;
+  // probable causes (e.g. "Poor ventilation", "Disease infected")
+  repeated string causes = 2;
+  // one-line treatment summary
+  optional string summary = 3;
+  // treatment / remediation steps (may be i18n keys or display strings)
+  repeated string treatments = 4;
+  // detection confidence 0..1
+  optional double confidence = 5;
+  // normalized bounding box in the image: [x1, y1, x2, y2] in 0..1
+  repeated double bbox = 6;
+}
+
+message DiagnoseRequest {
+  // image of the plant
+  string file = 1;
+  // previously-resolved plant id (from a prior Scan); optional
+  optional string plant_id = 2;
+  // ISO country code (default "US")
+  optional string country_code = 3;
+  // user latitude (WGS84); when set, the diagnosis engine factors in
+  // local climate (humidity, rainfall) for the verdict
+  optional double latitude = 4;
+  // user longitude (WGS84); see latitude
+  optional double longitude = 5;
+  // additional views for multi-image diagnosis — close-ups of the
+  // affected part(s), in order, appended after the whole-plant shot in
+  // `file`. Accepted as extra image parts (image2, image3, …). Empty for
+  // single-image diagnose.
+  repeated string additional_files = 6;
+}
+
+message DiagnoseResult {
+  // identified plant common name (echo from provider)
+  optional string plant_name = 1;
+  // identified plant latin name (echo from provider)
+  optional string latin_name = 2;
+  // detected diseases — empty when the plant looks healthy
+  repeated DiseaseInfo diseases = 3;
+  // high-level scene labels (e.g. care_situation="bad_care") with their
+  // top-1 probability per bucket
+  map<string, string> scene = 4;
+  // raw JSON envelope (provider-specific extras: care schedule, etc.)
+  optional string raw = 5;
+  // 12-month care schedule (one entry per calendar month, empty when the
+  // provider doesn't expose one)
+  repeated CareSchedule care_schedule = 6;
+  // seasonal care tips ("Pruning time? …") — short titled blurbs
+  repeated Tip tips = 7;
+  // plant id minted by the provider for follow-up calls (insight,
+  // water_calc, etc.); empty when the provider didn't return one
+  optional string plant_id = 8;
+  // optional reference image of a healthy version of the same species
+  optional string health_image_url = 9;
+  // which submitted image the diagnosis keyed on (0-based: 0 = primary
+  // `image`, 1 = `image2`, 2 = `image3`). Absent when the provider didn't
+  // report it or the plant looks healthy.
+  optional int32 diagnosis_image_index = 10;
+  // every submitted image the engine flagged as diseased (0-based), derived
+  // from the per-image detection list. The engine can flag more than one
+  // photo (e.g. two close-ups of affected parts); `diagnosis_image_index`
+  // names only the single primary pick. Empty when the plant looks healthy.
+  repeated int32 diseased_image_indexes = 11;
+}
+
+// One month's care schedule. `care_list` is a small map of care kind
+// label → cadence. The provider may emit -1 for "not applicable this
+// month" (e.g. fertilize in winter) — UIs should skip those.
+message CareSchedule {
+  // 1..12
+  int32 month = 1;
+  // care kind label (e.g. "watering", "fertilize", "pruning") → cadence
+  // in days. Negative values mean "no action this month".
+  map<string, int32> care_list = 2;
+}
+
+// A single titled care tip (gardening blurb). Returned by diagnose
+// + identify alike; provider-agnostic.
+message Tip {
+  // short, prompt-style title
+  optional string title = 1;
+  // markdown body content
+  string content = 2;
+  // priority hint when the provider sorted them (lower = more important)
+  optional int32 priority = 3;
+  // stable id when the provider exposes one (lets the UI cache)
+  optional string id = 4;
+}
+
+// Weather + climate context for the caller's location. Drives whether
+// the user should water more (hot, dry) or less (rainy season), and
+// surfaces gardening cues (hardiness zone, Köppen climate code).
+message WeatherRequest {
+  // user latitude (WGS84) — required
+  double latitude = 1;
+  // user longitude (WGS84) — required
+  double longitude = 2;
+  // ISO country code (default "US")
+  optional string country_code = 3;
+  // YYYY-MM-DD anchor day for the forecast window (default: today)
+  optional string day = 4;
+}
+
+message WeatherDay {
+  // calendar day (YYYY-MM-DD)
+  string day = 1;
+  // human-readable conditions (e.g. "Partially cloudy")
+  optional string conditions = 2;
+  // max temperature for the day, °C
+  optional double temperature_max = 3;
+  // min temperature for the day, °C
+  optional double temperature_min = 4;
+  // current / average temperature, °C
+  optional double temperature = 5;
+  // server-defined weather condition code
+  optional int32 condition_code = 6;
+  // CDN URL of an icon representing the conditions
+  optional string icon_url = 7;
+}
+
+message ClimateMonth {
+  // month of year (1..12)
+  int32 month = 1;
+  // historical max temperature for the month, °C
+  optional double temperature_max = 2;
+  // historical min temperature for the month, °C
+  optional double temperature_min = 3;
+  // historical average temperature for the month, °C
+  optional double temperature_avg = 4;
+}
+
+message WeatherResult {
+  // 9-day forecast window — typically 7 days history + today + tomorrow
+  repeated WeatherDay forecast = 1;
+  // monthly climatological averages (12 entries)
+  repeated ClimateMonth temperature_year = 2;
+  // USDA hardiness zone (e.g. "13a", "7b")
+  optional string hardiness_zone = 3;
+  // Köppen climate code (e.g. "Aw")
+  optional string climate_classification = 4;
+  // confidence on the climate classification, 0..100
+  optional int32 climate_confidence = 5;
+  // server-defined season code (1..N)
+  optional int32 season_type = 6;
+  // raw JSON envelope (provider-specific extras)
+  optional string raw = 7;
+}
+
+// Plant catalog text search — backs the search box in the PictureThis-
+// family plant database. Each RPC maps to one signed CMS-search endpoint;
+// the guest owns request signing and the encrypted-gzip response envelope.
+message PlantDetailRequest {
+  // catalog uid to hydrate — from a Search / Complete / PopularList row
+  string uid = 1;
+  // catalog language selector (numeric code as string; default "0")
+  optional string language_code = 2 [json_name="language_code"];
+  // ISO country code (default "US")
+  optional string country_code = 3 [json_name="country_code"];
+}
+
+message PlantDetailResult {
+  // echoes the requested uid
+  string uid = 1;
+  // localized preferred display name
+  optional string preferred_name = 2;
+  // botanical (Latin) name
+  optional string latin_name = 3;
+  // localized common names
+  repeated string common_names = 4;
+  // alternative / historical names
+  repeated string synonyms = 5;
+  // CDN URL of the primary image
+  optional string main_image_url = 6;
+  // taxonomy ladder: rank label ("Kingdom".."Genus") → name
+  map<string, string> taxonomy = 7;
+  // localized facts: server display_name → joined values (e.g. habit,
+  // bloom time, toxicity) drawn from the CMS tags[]
+  map<string, string> facts = 8;
+  // additional gallery image URLs beyond main_image_url
+  repeated string gallery = 9;
+  // full decrypted JSON envelope for fields not surfaced above
+  optional string raw = 10;
+}
+
+service PlantService {
+  // Full search: free-text query → ranked species matches. Maps to
+  // /api/v2/cmssearch/cms_search.
+  rpc Search(SearchRequest) returns (SearchResult);
+
+  // Species detail: hydrate one catalog uid into taxonomy, common
+  // names, facts, and gallery. Maps to /api/v3/cms/get_cms_name_list.
+  // Requires a session token; the executor mints a guest inline if the
+  // cache is cold (2-phase login→fetch, like Search).
+  rpc PlantDetail(PlantDetailRequest) returns (PlantDetailResult);
+
+  // Type-ahead: partial fragment → completion suggestions. Maps to
+  // /api/v2/cmssearch/cms_search_support_complete.
+  rpc Complete(CompleteRequest) returns (CompleteResult);
+
+  // Popular list: the species shown in an empty search box. Maps to
+  // /api/v2/cmssearch/cms_popular_list.
+  rpc PopularList(PopularListRequest) returns (PopularListResult);
+  // ------------------------------------------------------------------
+  // Plant-care follow-up RPCs — only the Glority-family plugins
+  // implement these. Each requires a session token minted by Scan;
+  // task executors auto-mint when the cache is cold (see Weather's
+  // 2-phase login→fetch executor). Carry latitude/longitude when the
+  // backend conditions output on local climate.
+  // ------------------------------------------------------------------
+
+  // Watering recommendation: water amount (mL), cadence (days), care
+  // category. Falls back to a default "I don't know my pot" branch
+  // when `settings` is omitted.
+  rpc WaterCalc(WaterCalcRequest) returns (WaterCalcResult);
+
+  // Repotting guidance: is the species repottable, was a pot visible
+  // in the image, and structured how-to-repot topics (preparation,
+  // tools, FAQ). `plant_name` is substituted into the markdown blurbs
+  // server-side via `__YOUR_PLANT_NAME__`.
+  rpc RepottingChecker(RepottingCheckerRequest) returns (RepottingCheckerResult);
+
+  // On-device light meter classification. PictureThis routes this
+  // inline (no server endpoint) — Rust maps a brightness reading to
+  // a 3-bucket label (Low light / Medium light / Bright light).
+  rpc LightMeter(LightMeterRequest) returns (LightMeterResult);
+
+  // Plant disease diagnosis: detected diseases with causes / treatments
+  // / bounding boxes, scene classification, 12-month care schedule,
+  // seasonal tips, plus the provider's typed `plant_id` for chaining
+  // follow-up calls (insight / health card / repot).
+  rpc Diagnose(DiagnoseRequest) returns (DiagnoseResult);
+
+  // 9-day forecast + 12-month historical climatology + USDA hardiness
+  // zone + Köppen climate code for the caller's location. Drives the
+  // climate-aware ranking on `Scan`/`Diagnose`/`WaterCalc`. Executor
+  // mints a guest session inline if none is cached.
+  rpc Weather(WeatherRequest) returns (WeatherResult);
+}

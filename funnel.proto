@@ -124,6 +124,8 @@ enum AdType {
   AD_TYPE_INTERSTITIAL = 1 [(asyncify.codegen.arg_string) = "interstitial"];
   AD_TYPE_REWARDED = 2 [(asyncify.codegen.arg_string) = "rewarded"];
   AD_TYPE_NATIVE = 3 [(asyncify.codegen.arg_string) = "native"];
+  // Also known as app-open. RC may author its slots as `open_*` as well as
+  // `resume_*` — both prefixes resolve to this one type.
   AD_TYPE_RESUME = 4 [(asyncify.codegen.arg_string) = "resume"];
   AD_TYPE_BANNER = 5 [(asyncify.codegen.arg_string) = "banner"];
 }
@@ -681,6 +683,7 @@ message AdGlobalPolicy {
 //   * `reward_*`  → rewarded       (AdType.REWARDED)
 //   * `native_*`  → native         (AdType.NATIVE)
 //   * `resume_*`  → resume (foreground) (AdType.RESUME)
+//   * `open_*`    → app-open, synonym for `resume_*` (AdType.RESUME)
 //   * `banner_*`  → banner         (AdType.BANNER)
 // Empty values are skipped by the guest. Example:
 //   { "inter_splash": "ca-app-pub-…/xxxx",
